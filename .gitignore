@@ -1,0 +1,41 @@
+# Dependencies
+/node_modules
+/bun.lockb
+
+# Build artifacts
+/dist
+/build
+/out
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE-specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Bun-specific caches
+.bun/
+
+# Temporary files
+/tmp
+*.tmp
+*.temp
+
+# Session data
+auth/*
