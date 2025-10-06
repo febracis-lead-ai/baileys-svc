@@ -71,27 +71,11 @@ router.post("/:id/logout", async (req, res) => {
   }
 });
 
-// Send text (with quote)
+// POST /sessions/:id/send
 router.post("/:id/send", async (req, res) => {
   try {
     const s = getSession(req.params.id);
-    const { to, text, options, quoted, quotedId } = req.body || {};
-    const sent = await s.sock.__sendText(to, text, {
-      options,
-      quoted,
-      quotedId,
-    });
-    res.json({ ok: true, key: sent?.key });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: String(e) });
-  }
-});
-
-// Send media
-router.post("/:id/send-media", async (req, res) => {
-  try {
-    const s = getSession(req.params.id);
-    const sent = await s.sock.__sendMedia(req.body || {});
+    const sent = await s.sock.__send(req.body);
     res.json({ ok: true, key: sent?.key });
   } catch (e) {
     res.status(400).json({ ok: false, error: String(e) });

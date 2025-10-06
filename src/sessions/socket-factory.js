@@ -7,6 +7,7 @@ import { sendWebhook } from "../webhook.js";
 import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
+import { randomBytes } from "crypto";
 
 // create socket, register listeners and return the sock
 export async function makeSocketForSession(session) {
@@ -103,40 +104,164 @@ export async function makeSocketForSession(session) {
     });
   });
 
-  // send/ack/media helpers exposed on the instance (makes routes easier)
-  sock.__sendText = async (to, text, { quoted, quotedId, options } = {}) => {
+  sock.__send = async (payload = {}) => {
+    const {
+      to,
+      type, // 'text'|'image'|'video'|'audio'|'document'|'sticker'|'poll'|'contacts'|'location'
+      text,
+      caption,
+      url, // for media (mutually exclusive with base64)
+      base64, // for media (mutually exclusive with url)
+      mimetype,
+      fileName,
+      ptt, // voice note (audio) if true
+      gifPlayback, // autoplay-loop for short mp4s
+      viewOnce, // photo/video (and most media) can be view-once
+      quality, // 'standard' | 'hd' | 'original' (see note below)
+      quoted, // full WAMessage to reply to (optional)
+      quotedId, // or just the message ID we cached
+      mentions, // array of JIDs or phone numbers to @ mention
+      // complex kinds:
+      poll, // { name, values: string[], selectableCount?, messageSecretB64? }
+      contacts, // { displayName?, vcards: string[] }  OR  { displayName?, contacts: [{ vcard }] }
+      location, // { latitude, longitude, name?, address? }
+      // pass-through for any Baileys options (e.g., scheduling, ephemeralExpiration, etc.)
+      options = {},
+    } = payload;
+
     const jid = toJid(to);
     const sendOpts = { ...(options || {}) };
+
+    // quoted: allow either a cached id or the full message
     if (quoted) sendOpts.quoted = quoted;
     else if (quotedId) {
-      const q = caches.messages.get(quotedId);
+      const q = session.caches.messages.get(quotedId);
       if (q) sendOpts.quoted = q;
     }
-    return sock.sendMessage(jid, { text }, sendOpts); // default send :contentReference[oaicite:14]{index=14}
-  };
 
-  sock.__sendMedia = async ({
-    to,
-    kind,
-    url,
-    base64,
-    caption,
-    mimetype,
-    fileName,
-    ptt,
-  }) => {
-    const jid = toJid(to);
-    const data = base64 ? Buffer.from(base64, "base64") : undefined;
+    // @mentions -> contextInfo.mentionedJid (normalize numbers into JIDs)
+    const mentionedJid = Array.isArray(mentions)
+      ? mentions.map((m) =>
+          /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
+        )
+      : undefined;
+
+    // media source
+    const media = base64
+      ? Buffer.from(base64, "base64")
+      : url
+      ? { url }
+      : undefined;
+
     let content;
-    if (kind === "image") content = { image: url ? { url } : data, caption };
-    else if (kind === "audio")
-      content = { audio: url ? { url } : data, ptt: !!ptt, mimetype };
-    else if (kind === "video")
-      content = { video: url ? { url } : data, caption, mimetype };
-    else if (kind === "document")
-      content = { document: url ? { url } : data, fileName, mimetype };
-    else throw new Error("invalid kind");
-    return sock.sendMessage(jid, content);
+
+    switch (type) {
+      case "text":
+        content = { text };
+        break;
+
+      case "image": {
+        // NOTE on "HD/original": WhatsApp UI has an HD toggle, but Baileys does not expose
+        // a documented flag. To preserve highest quality reliably, send the image as a
+        // *document* (no re-encoding by WA), keeping the correct mimetype/filename.
+        // See explanation below.
+        const sendAsDocument = quality === "hd" || quality === "original";
+        content = sendAsDocument
+          ? {
+              document: media,
+              mimetype: mimetype || "image/jpeg",
+              fileName: fileName || "image.jpg",
+            }
+          : { image: media, caption, mimetype };
+        if (viewOnce) content.viewOnce = true;
+        break;
+      }
+
+      case "video": {
+        const sendAsDocument = quality === "hd" || quality === "original";
+        content = sendAsDocument
+          ? {
+              document: media,
+              mimetype: mimetype || "video/mp4",
+              fileName: fileName || "video.mp4",
+            }
+          : { video: media, caption, mimetype, gifPlayback: !!gifPlayback };
+        if (viewOnce) content.viewOnce = true;
+        break;
+      }
+
+      case "audio":
+        content = {
+          audio: media,
+          ptt: !!ptt,
+          // Voice notes work best as OGG/Opus when ptt=true
+          mimetype: mimetype || (ptt ? "audio/ogg; codecs=opus" : undefined),
+        };
+        break;
+
+      case "document":
+        content = { document: media, mimetype, fileName };
+        break;
+
+      case "sticker":
+        // Stickers are typically WEBP. You must convert beforehand if you start from PNG/JPG.
+        content = { sticker: media, mimetype: mimetype || "image/webp" };
+        break;
+
+      case "contacts": {
+        // Accept { displayName?, vcards:[] } OR { displayName?, contacts:[{vcard}] }
+        let displayName = contacts?.displayName || "Contact";
+        let arr = [];
+        if (Array.isArray(contacts?.vcards)) {
+          arr = contacts.vcards.map((v) => ({ vcard: v }));
+        } else if (Array.isArray(contacts?.contacts)) {
+          arr = contacts.contacts.map((c) => ({ vcard: c.vcard }));
+        }
+        content = { contacts: { displayName, contacts: arr } };
+        break;
+      }
+
+      case "poll": {
+        // PollMessageOptions: { name, values, selectableCount?, messageSecret? }
+        let messageSecret = poll?.messageSecretB64
+          ? Buffer.from(poll.messageSecretB64, "base64")
+          : randomBytes(32); // generate one if not provided
+        content = {
+          poll: {
+            name: poll?.name,
+            values: poll?.values || [],
+            selectableCount: poll?.selectableCount,
+            messageSecret,
+          },
+        };
+        break;
+      }
+
+      case "location":
+        content = {
+          location: {
+            degreesLatitude: Number(location?.latitude),
+            degreesLongitude: Number(location?.longitude),
+            name: location?.name,
+            address: location?.address,
+          },
+        };
+        break;
+
+      default:
+        // Escape hatch: allow raw Baileys content (advanced/edge cases)
+        if (payload.content) {
+          content = payload.content;
+        } else {
+          throw new Error(`Unsupported type: ${type}`);
+        }
+    }
+
+    if (mentionedJid?.length) {
+      content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
+    }
+
+    return await sock.sendMessage(jid, content, sendOpts);
   };
 
   sock.__download = async (wamessage) => {
