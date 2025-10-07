@@ -11,8 +11,18 @@
     "redis"
   ],
   "remoteUser": "bun",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "username": "bun"
+    }
+  },
   "customizations": {
     "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      },
       "extensions": [
         "ms-azuretools.vscode-docker",
         "esbenp.prettier-vscode",
@@ -20,7 +30,6 @@
       ]
     }
   },
-  "postCreateCommand": "bun install || true",
   "forwardPorts": [
     3002
   ],
