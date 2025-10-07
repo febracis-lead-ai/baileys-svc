@@ -1,10 +1,7 @@
 import { rm } from "fs/promises";
-
 import NodeCache from "node-cache";
-
-import { useMultiFileAuthState, Browsers } from "@whiskeysockets/baileys";
-
-import { AUTH_BASE_DIR } from "../config.js";
+import { Browsers } from "@whiskeysockets/baileys";
+import { useRedisAuthState } from "./redis-auth-store.js";
 import { makeSocketForSession } from "./socket-factory.js";
 
 export const sessions = new Map(); // sessionId -> { id, sock, state, saveCreds, caches, lastQR, status }
@@ -12,8 +9,11 @@ export const sessions = new Map(); // sessionId -> { id, sock, state, saveCreds,
 export async function ensureSession(sessionId) {
   if (sessions.has(sessionId)) return sessions.get(sessionId);
 
-  const authDir = `${AUTH_BASE_DIR}/${sessionId}`;
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  // usa o sessionId correto para carregar estado no Redis
+  const { state, saveCreds, redis } = await useRedisAuthState(
+    sessionId,
+    process.env.REDIS_URL
+  );
 
   const s = {
     id: sessionId,
@@ -28,6 +28,7 @@ export async function ensureSession(sessionId) {
     },
     browser: Browsers.macOS("Chrome"),
     sock: null,
+    redis, // guarda o cliente redis na sessão (útil no logout/clean)
   };
 
   s.sock = await makeSocketForSession(s);
@@ -61,7 +62,30 @@ export async function logoutSession(sessionId) {
   }
   sessions.delete(sessionId);
 
-  const authDir = `${AUTH_BASE_DIR}/${sessionId}`;
+  // (opcional) limpar chaves da sessão no Redis com SCAN para evitar KEYS em produção
+  try {
+    if (s.redis) {
+      const prefix = `wa:${sessionId}:`;
+      let cursor = "0";
+      do {
+        const [next, keys] = await s.redis.scan(
+          cursor,
+          "MATCH",
+          `${prefix}*`,
+          "COUNT",
+          "1000"
+        );
+        cursor = next;
+        if (keys.length) await s.redis.del(keys);
+      } while (cursor !== "0");
+    }
+  } catch (e) {
+    console.warn(
+      `[logoutSession] redis cleanup failed for ${sessionId}:`,
+      e.message
+    );
+  }
+
   try {
     await rm(authDir, { recursive: true, force: true });
   } catch (err) {

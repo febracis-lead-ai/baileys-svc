@@ -5,6 +5,7 @@
     "@whiskeysockets/baileys": "^7.0.0-rc.5",
     "axios": "^1.7.2",
     "express": "^4.19.2",
+    "ioredis": "^5.8.1",
     "node-cache": "^5.1.2",
     "qrcode": "^1.5.3"
   },

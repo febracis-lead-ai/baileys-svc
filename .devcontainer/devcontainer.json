@@ -1,7 +1,15 @@
 {
   "name": "Baileys Bun Service",
-  "image": "oven/bun:latest",
-  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "dockerComposeFile": [
+    "../docker-compose.dev.yml"
+  ],
+  "service": "baileys-dev",
+  "workspaceFolder": "/workspaces/baileys-svc",
+  "overrideCommand": true,
+  "runServices": [
+    "baileys-dev",
+    "redis"
+  ],
   "remoteUser": "bun",
   "customizations": {
     "vscode": {
@@ -12,23 +20,16 @@
       ]
     }
   },
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {}
-  },
   "postCreateCommand": "bun install || true",
   "forwardPorts": [
     3002
   ],
-  "portsAttributes": {
-    "3002": {
-      "label": "Baileys HTTP API"
-    }
-  },
   "mounts": [
-    "source=${localWorkspaceFolder}/auth,target=/workspaces/${localWorkspaceFolderBasename}/auth,type=bind"
+    "source=${localWorkspaceFolder}/auth,target=/workspaces/baileys-svc/auth,type=bind"
   ],
   "env": {
     "NODE_ENV": "development",
-    "PORT": "3002"
+    "PORT": "3002",
+    "REDIS_URL": "redis://redis:6379"
   }
 }

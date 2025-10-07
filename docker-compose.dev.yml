@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  baileys-dev:
+    image: oven/bun:latest
+    working_dir: /workspaces/baileys-svc
+    command: [ "sleep", "infinity" ]
+    environment:
+      PORT: ${PORT:-3002}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+    volumes:
+      - ./:/workspaces/baileys-svc
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
