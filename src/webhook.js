@@ -1,5 +1,10 @@
-import crypto from "crypto";
-import { WEBHOOK_URL, WEBHOOK_SECRET } from "./config.js";
+import {
+  WEBHOOK_URL,
+  WEBHOOK_AUTH_TYPE,
+  WEBHOOK_AUTH_USER,
+  WEBHOOK_AUTH_PASSWORD,
+  WEBHOOK_AUTH_TOKEN,
+} from "./config.js";
 
 export async function sendWebhook(sessionId, event, payload) {
   if (!WEBHOOK_URL) return { ok: false, reason: "no-webhook-url" };
@@ -8,12 +13,20 @@ export async function sendWebhook(sessionId, event, payload) {
   const body = JSON.stringify(bodyObj);
 
   const headers = { "Content-Type": "application/json" };
-  if (WEBHOOK_SECRET) {
-    const sig = crypto
-      .createHmac("sha256", WEBHOOK_SECRET)
-      .update(body)
-      .digest("hex");
-    headers["X-Signature"] = sig;
+
+  if (
+    WEBHOOK_AUTH_TYPE === "basic" &&
+    WEBHOOK_AUTH_USER &&
+    WEBHOOK_AUTH_PASSWORD
+  ) {
+    const credentials = Buffer.from(
+      `${WEBHOOK_AUTH_USER}:${WEBHOOK_AUTH_PASSWORD}`
+    ).toString("base64");
+    headers["Authorization"] = `Basic ${credentials}`;
+  } else if (WEBHOOK_AUTH_TYPE === "token" && WEBHOOK_AUTH_TOKEN) {
+    headers["Authorization"] = `Token ${WEBHOOK_AUTH_TOKEN}`;
+  } else if (WEBHOOK_AUTH_TYPE === "bearer" && WEBHOOK_AUTH_TOKEN) {
+    headers["Authorization"] = `Bearer ${WEBHOOK_AUTH_TOKEN}`;
   }
 
   const ac = new AbortController();
