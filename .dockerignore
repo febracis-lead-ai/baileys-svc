@@ -1,0 +1,12 @@
+# dependências / caches
+node_modules
+bun.lockb
+npm-debug.log
+yarn-error.log
+.pnpm-store
+.cache
+dist
+.vscode
+.idea
+auth
+.DS_Store
