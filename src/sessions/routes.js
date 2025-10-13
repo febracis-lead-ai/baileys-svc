@@ -1,10 +1,9 @@
 import { Router } from "express";
 import {
   ensureSession,
-  getSession,
-  restartSession,
   logoutSession,
   listSessions,
+  getOrEnsureSession,
 } from "./manager.js";
 
 export const router = Router();
@@ -22,19 +21,18 @@ router.post("/:id/init", async (req, res) => {
 router.get("/", (_req, res) => res.json(listSessions()));
 
 // Status/QR
-router.get("/:id/status", (req, res) => {
+router.get("/:id/status", async (req, res) => {
   try {
-    const s = getSession(req.params.id);
-    res.json({ id: s.id, status: s.status, hasQR: !!s.lastQR });
+    const s = await ensureSession(req.params.id);
+    res.json({ ok: true, status: s.status });
   } catch (e) {
     res.status(404).json({ ok: false, error: String(e) });
   }
 });
-router.get("/:id/qr", (req, res) => {
+
+router.get("/:id/qr", async (req, res) => {
   try {
-    const s = getSession(req.params.id);
-    if (!s.lastQR) return res.status(404).json({ error: "QR unavailable" });
-    res.json({ qr: s.lastQR });
+    const s = await ensureSession(req.params.id);
   } catch (e) {
     res.status(404).json({ ok: false, error: String(e) });
   }
@@ -43,9 +41,7 @@ router.get("/:id/qr", (req, res) => {
 // Pairing code (E.164 without '+')
 router.post("/:id/pairing-code", async (req, res) => {
   try {
-    const s = getSession(req.params.id);
-    const { phoneE164NoPlus } = req.body || {};
-    const code = await s.sock.requestPairingCode(phoneE164NoPlus);
+    const s = await ensureSession(req.params.id);
     res.json({ code });
   } catch (e) {
     res.status(400).json({ ok: false, error: String(e) });
@@ -53,15 +49,14 @@ router.post("/:id/pairing-code", async (req, res) => {
 });
 
 // Disconnect / Logout
-router.post("/:id/disconnect", (req, res) => {
+router.post("/:id/disconnect", async (req, res) => {
   try {
-    const s = getSession(req.params.id);
-    if (s.sock?.ws?.close) s.sock.ws.close(1000, "manual disconnect");
-    res.json({ ok: true });
+    const s = await ensureSession(req.params.id);
   } catch (e) {
     res.status(400).json({ ok: false, error: String(e) });
   }
 });
+
 router.post("/:id/logout", async (req, res) => {
   try {
     await logoutSession(req.params.id);

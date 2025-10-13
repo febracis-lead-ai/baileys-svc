@@ -1,4 +1,3 @@
-import { rm } from "fs/promises";
 import NodeCache from "node-cache";
 import { Browsers } from "@whiskeysockets/baileys";
 import { useRedisAuthState } from "./redis-auth-store.js";
@@ -9,7 +8,6 @@ export const sessions = new Map(); // sessionId -> { id, sock, state, saveCreds,
 export async function ensureSession(sessionId) {
   if (sessions.has(sessionId)) return sessions.get(sessionId);
 
-  // usa o sessionId correto para carregar estado no Redis
   const { state, saveCreds, redis } = await useRedisAuthState(
     sessionId,
     process.env.REDIS_URL
@@ -28,7 +26,7 @@ export async function ensureSession(sessionId) {
     },
     browser: Browsers.macOS("Chrome"),
     sock: null,
-    redis, // guarda o cliente redis na sessão (útil no logout/clean)
+    redis,
   };
 
   s.sock = await makeSocketForSession(s);
@@ -40,6 +38,10 @@ export function getSession(sessionId) {
   const s = sessions.get(sessionId);
   if (!s) throw new Error(`Session '${sessionId}' not found`);
   return s;
+}
+
+export async function getOrEnsureSession(sessionId) {
+  return sessions.get(sessionId) || (await ensureSession(sessionId));
 }
 
 export async function restartSession(sessionId) {
@@ -62,7 +64,6 @@ export async function logoutSession(sessionId) {
   }
   sessions.delete(sessionId);
 
-  // (opcional) limpar chaves da sessão no Redis com SCAN para evitar KEYS em produção
   try {
     if (s.redis) {
       const prefix = `wa:${sessionId}:`;
