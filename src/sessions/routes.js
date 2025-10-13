@@ -20,7 +20,7 @@ router.post("/:id/init", async (req, res) => {
 
 router.get("/", (_req, res) => res.json(listSessions()));
 
-// Status/QR
+// Status
 router.get("/:id/status", async (req, res) => {
   try {
     const s = await ensureSession(req.params.id);
@@ -30,9 +30,23 @@ router.get("/:id/status", async (req, res) => {
   }
 });
 
+// QR
 router.get("/:id/qr", async (req, res) => {
   try {
     const s = await ensureSession(req.params.id);
+    const started = Date.now();
+    const timeoutMs = 15000;
+
+    while (
+      !s.lastQR &&
+      s.status !== "open" &&
+      Date.now() - started < timeoutMs
+    ) {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+
+    if (!s.lastQR) return res.status(404).json({ error: "QR unavailable" });
+    res.json({ qr: s.lastQR });
   } catch (e) {
     res.status(404).json({ ok: false, error: String(e) });
   }
