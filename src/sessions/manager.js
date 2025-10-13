@@ -86,12 +86,6 @@ export async function logoutSession(sessionId) {
     );
   }
 
-  try {
-    await rm(authDir, { recursive: true, force: true });
-  } catch (err) {
-    console.error(`Error deleting directory ${authDir}:`, err);
-  }
-
   return true;
 }
 
