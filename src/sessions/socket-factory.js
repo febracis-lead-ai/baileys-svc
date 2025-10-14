@@ -1,23 +1,35 @@
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
+  fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
+import { randomBytes } from "crypto";
+
 import { sendWebhook } from "../services/webhook.js";
 import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
-import { randomBytes } from "crypto";
 
 // create socket, register listeners and return the sock
 export async function makeSocketForSession(session) {
   const { state, saveCreds, caches, browser } = session;
 
+  const { version } = await fetchLatestBaileysVersion();
+  console.log(`[${session.id}] Using WA version ${version.join(".")}`);
+
   const sock = makeWASocket({
-    auth: state,
+    version, // ← ADICIONAR
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys), // ← MODIFICAR
+    },
     browser,
+    printQRInTerminal: false,
+    connectTimeoutMs: 60000,
+    qrTimeout: 60000,
     cachedGroupMetadata: async (jid) => caches.groups.get(jid),
-    // getMessage is important for re-send/decryption (polls etc.) :contentReference[oaicite:11]{index=11}
     getMessage: async (key) => {
       const m = key?.id ? caches.messages.get(key.id) : undefined;
       return m?.message;
@@ -30,9 +42,21 @@ export async function makeSocketForSession(session) {
   sock.ev.on(
     "connection.update",
     async ({ connection, lastDisconnect, qr }) => {
+      console.log(`[${session.id}] Connection update:`, {
+        connection,
+        hasQR: !!qr,
+        qrLength: qr?.length,
+      });
+
       session.status = connection || "close";
+
       if (qr) {
+        console.log(
+          `[${session.id}] 🎯 QR CODE GENERATED! Length: ${qr.length}`
+        );
+
         session.lastQR = qr;
+        session.qrGeneratedAt = Date.now();
         if (SHOW_QR_IN_TERMINAL) {
           console.log(
             await QRCode.toString(qr, { type: "terminal", small: true })
