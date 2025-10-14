@@ -4,6 +4,7 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.5",
     "axios": "^1.7.2",
+    "compression": "^1.8.1",
     "express": "^4.19.2",
     "ioredis": "^5.8.1",
     "node-cache": "^5.1.2",

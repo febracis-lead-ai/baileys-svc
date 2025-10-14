@@ -3,7 +3,7 @@ import makeWASocket, {
   downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
-import { sendWebhook } from "../webhook.js";
+import { sendWebhook } from "../services/webhook.js";
 import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
