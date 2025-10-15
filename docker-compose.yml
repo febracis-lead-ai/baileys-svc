@@ -7,14 +7,14 @@ services:
     image: baileys-svc:prod
     env_file: .env
     ports:
-      - "3002:3002"
+      - "3001:3001"
     depends_on:
       - redis
     volumes:
       - baileys_auth:/app/auth
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD-SHELL", "curl -fsS http://localhost:3002/healthz || exit 1" ]
+      test: [ "CMD-SHELL", "curl -fsS http://localhost:3001/healthz || exit 1" ]
       interval: 30s
       timeout: 5s
       retries: 3

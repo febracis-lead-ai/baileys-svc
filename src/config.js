@@ -1,4 +1,4 @@
-export const PORT = parseInt(process.env.PORT || "3002", 10);
+export const PORT = parseInt(process.env.PORT || "3001", 10);
 export const WEBHOOK_URL = process.env.WEBHOOK_URL || "";
 export const WEBHOOK_AUTH_TYPE = process.env.WEBHOOK_AUTH_TYPE || "";
 export const WEBHOOK_AUTH_USER = process.env.WEBHOOK_AUTH_USER || "";

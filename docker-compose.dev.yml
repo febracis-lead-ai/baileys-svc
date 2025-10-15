@@ -5,7 +5,7 @@ services:
     working_dir: /workspaces/baileys-svc
     command: [ "sleep", "infinity" ]
     environment:
-      PORT: ${PORT:-3002}
+      PORT: ${PORT:-3001}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     volumes:
       - ./:/workspaces/baileys-svc

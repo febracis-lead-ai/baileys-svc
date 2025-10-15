@@ -15,7 +15,7 @@ COPY src ./src
 COPY package.json ./
 
 ENV NODE_ENV=production
-EXPOSE 3002
+EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:3001/healthz || exit 1
