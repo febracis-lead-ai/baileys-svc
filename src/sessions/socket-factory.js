@@ -12,7 +12,32 @@ import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
 
-// create socket, register listeners and return the sock
+function serializeBaileysData(data) {
+  return JSON.parse(
+    JSON.stringify(data, (key, value) => {
+      if (value?.type === "Buffer" && Array.isArray(value?.data)) {
+        return {
+          type: "Buffer",
+          data: Buffer.from(value.data).toString("base64"),
+        };
+      }
+      if (value instanceof Buffer) {
+        return {
+          type: "Buffer",
+          data: value.toString("base64"),
+        };
+      }
+      if (value instanceof Uint8Array) {
+        return {
+          type: "Buffer",
+          data: Buffer.from(value).toString("base64"),
+        };
+      }
+      return value;
+    })
+  );
+}
+
 export async function makeSocketForSession(session) {
   const { state, saveCreds, caches, browser } = session;
 
@@ -20,10 +45,10 @@ export async function makeSocketForSession(session) {
   console.log(`[${session.id}] Using WA version ${version.join(".")}`);
 
   const sock = makeWASocket({
-    version, // ← ADICIONAR
+    version,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys), // ← MODIFICAR
+      keys: makeCacheableSignalKeyStore(state.keys),
     },
     browser,
     printQRInTerminal: false,
@@ -38,51 +63,49 @@ export async function makeSocketForSession(session) {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // connection.update (restarts on 515 — restartRequired) :contentReference[oaicite:12]{index=12}
-  sock.ev.on(
-    "connection.update",
-    async ({ connection, lastDisconnect, qr }) => {
-      console.log(`[${session.id}] Connection update:`, {
-        connection,
-        hasQR: !!qr,
-        qrLength: qr?.length,
-      });
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
 
-      session.status = connection || "close";
+    console.log(`[${session.id}] Connection update:`, {
+      connection,
+      hasQR: !!qr,
+      qrLength: qr?.length,
+    });
 
-      if (qr) {
+    session.status = connection || "close";
+
+    if (qr) {
+      console.log(`[${session.id}] 🎯 QR CODE GENERATED! Length: ${qr.length}`);
+
+      session.lastQR = qr;
+      session.qrGeneratedAt = Date.now();
+      if (SHOW_QR_IN_TERMINAL) {
         console.log(
-          `[${session.id}] 🎯 QR CODE GENERATED! Length: ${qr.length}`
+          await QRCode.toString(qr, { type: "terminal", small: true })
         );
-
-        session.lastQR = qr;
-        session.qrGeneratedAt = Date.now();
-        if (SHOW_QR_IN_TERMINAL) {
-          console.log(
-            await QRCode.toString(qr, { type: "terminal", small: true })
-          );
-        }
       }
-      if (connection === "open") session.lastQR = null;
-
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (connection === "close" && code === DisconnectReason.restartRequired) {
-        console.warn(
-          `[${session.id}] restartRequired (515) — restarting session`
-        );
-        await restartSession(session.id);
-        return;
-      }
-      await sendWebhook(session.id, "connection.update", {
-        connection,
-        hasQR: !!qr,
-      });
     }
-  );
+    if (connection === "open") session.lastQR = null;
 
-  // messages.upsert (handle ALL items in the array) :contentReference[oaicite:13]{index=13}
+    const code = lastDisconnect?.error?.output?.statusCode;
+    if (connection === "close" && code === DisconnectReason.restartRequired) {
+      console.warn(
+        `[${session.id}] restartRequired (515) — restarting session`
+      );
+      await restartSession(session.id);
+      return;
+    }
+
+    await sendWebhook(
+      session.id,
+      "connection.update",
+      serializeBaileysData(update)
+    );
+  });
+
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (!messages?.length) return;
+
     for (const m of messages) {
       if (m?.key?.id) caches.messages.set(m.key.id, m);
       if (m?.pushName && m?.key?.remoteJid) {
@@ -92,25 +115,49 @@ export async function makeSocketForSession(session) {
         caches.contacts.set(m.key.remoteJid, { ...prev, notify: m.pushName });
       }
     }
-    await sendWebhook(session.id, "messages.upsert", { type, messages });
+
+    await sendWebhook(
+      session.id,
+      "messages.upsert",
+      serializeBaileysData({ type, messages })
+    );
   });
 
-  // other useful events
-  sock.ev.on("message-receipt.update", async (u) =>
-    sendWebhook(session.id, "message-receipt.update", u)
-  );
-  sock.ev.on("messages.update", async (u) =>
-    sendWebhook(session.id, "messages.update", u)
-  );
-  sock.ev.on("messages.reaction", async (u) =>
-    sendWebhook(session.id, "messages.reaction", u)
-  );
-  sock.ev.on("contacts.upsert", async (u) => {
-    u?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
-    await sendWebhook(session.id, "contacts.upsert", u);
+  sock.ev.on("message-receipt.update", async (updates) => {
+    await sendWebhook(
+      session.id,
+      "message-receipt.update",
+      serializeBaileysData(updates)
+    );
   });
-  sock.ev.on("contacts.update", async (u) => {
-    u?.forEach(
+
+  sock.ev.on("messages.update", async (updates) => {
+    await sendWebhook(
+      session.id,
+      "messages.update",
+      serializeBaileysData(updates)
+    );
+  });
+
+  sock.ev.on("messages.reaction", async (reactions) => {
+    await sendWebhook(
+      session.id,
+      "messages.reaction",
+      serializeBaileysData(reactions)
+    );
+  });
+
+  sock.ev.on("contacts.upsert", async (contacts) => {
+    contacts?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
+    await sendWebhook(
+      session.id,
+      "contacts.upsert",
+      serializeBaileysData(contacts)
+    );
+  });
+
+  sock.ev.on("contacts.update", async (updates) => {
+    updates?.forEach(
       (c) =>
         c?.id &&
         caches.contacts.set(c.id, {
@@ -118,59 +165,144 @@ export async function makeSocketForSession(session) {
           ...c,
         })
     );
-    await sendWebhook(session.id, "contacts.update", u);
+    await sendWebhook(
+      session.id,
+      "contacts.update",
+      serializeBaileysData(updates)
+    );
   });
-  sock.ev.on("messaging-history.set", async (hist) => {
-    if (hist?.contacts?.length)
-      hist.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
-    await sendWebhook(session.id, "messaging-history.set", {
-      syncType: hist?.syncType,
-    });
+
+  sock.ev.on("messaging-history.set", async (history) => {
+    if (history?.contacts?.length) {
+      history.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
+    }
+
+    await sendWebhook(
+      session.id,
+      "messaging-history.set",
+      serializeBaileysData(history)
+    );
+  });
+
+  sock.ev.on("groups.upsert", async (groups) => {
+    groups?.forEach((g) => g?.id && caches.groups.set(g.id, g));
+    await sendWebhook(
+      session.id,
+      "groups.upsert",
+      serializeBaileysData(groups)
+    );
+  });
+
+  sock.ev.on("groups.update", async (updates) => {
+    updates?.forEach(
+      (g) =>
+        g?.id &&
+        caches.groups.set(g.id, {
+          ...(caches.groups.get(g.id) || {}),
+          ...g,
+        })
+    );
+    await sendWebhook(
+      session.id,
+      "groups.update",
+      serializeBaileysData(updates)
+    );
+  });
+
+  sock.ev.on("group-participants.update", async (update) => {
+    await sendWebhook(
+      session.id,
+      "group-participants.update",
+      serializeBaileysData(update)
+    );
+  });
+
+  sock.ev.on("presence.update", async (update) => {
+    await sendWebhook(
+      session.id,
+      "presence.update",
+      serializeBaileysData(update)
+    );
+  });
+
+  sock.ev.on("chats.upsert", async (chats) => {
+    await sendWebhook(session.id, "chats.upsert", serializeBaileysData(chats));
+  });
+
+  sock.ev.on("chats.update", async (updates) => {
+    await sendWebhook(
+      session.id,
+      "chats.update",
+      serializeBaileysData(updates)
+    );
+  });
+
+  sock.ev.on("chats.delete", async (deletions) => {
+    await sendWebhook(
+      session.id,
+      "chats.delete",
+      serializeBaileysData(deletions)
+    );
+  });
+
+  sock.ev.on("messages.delete", async (deletions) => {
+    await sendWebhook(
+      session.id,
+      "messages.delete",
+      serializeBaileysData(deletions)
+    );
+  });
+
+  sock.ev.on("call", async (calls) => {
+    await sendWebhook(session.id, "call", serializeBaileysData(calls));
+  });
+
+  sock.ev.on("blocklist.update", async (update) => {
+    await sendWebhook(
+      session.id,
+      "blocklist.update",
+      serializeBaileysData(update)
+    );
   });
 
   sock.__send = async (payload = {}) => {
     const {
       to,
-      type, // 'text'|'image'|'video'|'audio'|'document'|'sticker'|'poll'|'contacts'|'location'
+      type,
       text,
       caption,
-      url, // for media (mutually exclusive with base64)
-      base64, // for media (mutually exclusive with url)
+      url,
+      base64,
       mimetype,
       fileName,
-      ptt, // voice note (audio) if true
-      gifPlayback, // autoplay-loop for short mp4s
-      viewOnce, // photo/video (and most media) can be view-once
-      quality, // 'standard' | 'hd' | 'original' (see note below)
-      quoted, // full WAMessage to reply to (optional)
-      quotedId, // or just the message ID we cached
-      mentions, // array of JIDs or phone numbers to @ mention
-      // complex kinds:
-      poll, // { name, values: string[], selectableCount?, messageSecretB64? }
-      contacts, // { displayName?, vcards: string[] }  OR  { displayName?, contacts: [{ vcard }] }
-      location, // { latitude, longitude, name?, address? }
-      // pass-through for any Baileys options (e.g., scheduling, ephemeralExpiration, etc.)
+      ptt,
+      gifPlayback,
+      viewOnce,
+      quality,
+      quoted,
+      quotedId,
+      mentions,
+      poll,
+      contacts,
+      location,
       options = {},
     } = payload;
 
     const jid = toJid(to);
     const sendOpts = { ...(options || {}) };
 
-    // quoted: allow either a cached id or the full message
     if (quoted) sendOpts.quoted = quoted;
     else if (quotedId) {
       const q = session.caches.messages.get(quotedId);
       if (q) sendOpts.quoted = q;
     }
 
-    // @mentions -> contextInfo.mentionedJid (normalize numbers into JIDs)
     const mentionedJid = Array.isArray(mentions)
       ? mentions.map((m) =>
           /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
         )
       : undefined;
 
-    // media source
     const media = base64
       ? Buffer.from(base64, "base64")
       : url
@@ -185,10 +317,6 @@ export async function makeSocketForSession(session) {
         break;
 
       case "image": {
-        // NOTE on "HD/original": WhatsApp UI has an HD toggle, but Baileys does not expose
-        // a documented flag. To preserve highest quality reliably, send the image as a
-        // *document* (no re-encoding by WA), keeping the correct mimetype/filename.
-        // See explanation below.
         const sendAsDocument = quality === "hd" || quality === "original";
         content = sendAsDocument
           ? {
@@ -218,7 +346,6 @@ export async function makeSocketForSession(session) {
         content = {
           audio: media,
           ptt: !!ptt,
-          // Voice notes work best as OGG/Opus when ptt=true
           mimetype: mimetype || (ptt ? "audio/ogg; codecs=opus" : undefined),
         };
         break;
@@ -228,12 +355,10 @@ export async function makeSocketForSession(session) {
         break;
 
       case "sticker":
-        // Stickers are typically WEBP. You must convert beforehand if you start from PNG/JPG.
         content = { sticker: media, mimetype: mimetype || "image/webp" };
         break;
 
       case "contacts": {
-        // Accept { displayName?, vcards:[] } OR { displayName?, contacts:[{vcard}] }
         let displayName = contacts?.displayName || "Contact";
         let arr = [];
         if (Array.isArray(contacts?.vcards)) {
@@ -246,10 +371,9 @@ export async function makeSocketForSession(session) {
       }
 
       case "poll": {
-        // PollMessageOptions: { name, values, selectableCount?, messageSecret? }
         let messageSecret = poll?.messageSecretB64
           ? Buffer.from(poll.messageSecretB64, "base64")
-          : randomBytes(32); // generate one if not provided
+          : randomBytes(32);
         content = {
           poll: {
             name: poll?.name,
@@ -273,7 +397,6 @@ export async function makeSocketForSession(session) {
         break;
 
       default:
-        // Escape hatch: allow raw Baileys content (advanced/edge cases)
         if (payload.content) {
           content = payload.content;
         } else {
@@ -293,9 +416,11 @@ export async function makeSocketForSession(session) {
     return buffer;
   };
 
-  sock.__read = async (keys) => sock.readMessages(keys); // read :contentReference[oaicite:15]{index=15}
+  sock.__read = async (keys) => sock.readMessages(keys);
+
   sock.__receipt = async (jid, participant, ids, type) =>
-    sock.sendReceipt(jid, participant, ids, type); // generic receipt :contentReference[oaicite:16]{index=16}
+    sock.sendReceipt(jid, participant, ids, type);
+
   sock.__contactInfo = async (id, cachesRef = caches) => {
     const jid = toJid(id);
     let profilePictureUrl;
