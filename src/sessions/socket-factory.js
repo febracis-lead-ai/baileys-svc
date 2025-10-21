@@ -8,6 +8,11 @@ import QRCode from "qrcode";
 import { randomBytes } from "crypto";
 
 import { sendWebhook } from "../services/webhook.js";
+import {
+  shouldSendMessageWebhook,
+  shouldSendEventWebhook,
+  filterMessages
+} from "../services/webhook-filter.js";
 import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
@@ -86,16 +91,18 @@ export async function makeSocketForSession(session) {
         );
       }
 
-      await sendWebhook(
-        session.id,
-        "qr.updated",
-        {
-          sessionId: session.id,
-          qr: qr,
-          generatedAt: session.qrGeneratedAt,
-          expiresAt: session.qrGeneratedAt + 60000, // ~60s
-        }
-      );
+      if (shouldSendEventWebhook("qr.updated")) {
+        await sendWebhook(
+          session.id,
+          "qr.updated",
+          {
+            sessionId: session.id,
+            qr: qr,
+            generatedAt: session.qrGeneratedAt,
+            expiresAt: session.qrGeneratedAt + 60000,
+          }
+        );
+      }
     }
 
     if (connection === "open") {
@@ -117,11 +124,13 @@ export async function makeSocketForSession(session) {
 
       console.log(`[${session.id}] ✅ Session connected successfully:`, accountInfo);
 
-      await sendWebhook(
-        session.id,
-        "session.connected",
-        accountInfo
-      );
+      if (shouldSendEventWebhook("session.connected")) {
+        await sendWebhook(
+          session.id,
+          "session.connected",
+          accountInfo
+        );
+      }
     }
 
     if (connection === "close") {
@@ -142,11 +151,13 @@ export async function makeSocketForSession(session) {
 
       console.log(`[${session.id}] ❌ Session disconnected:`, disconnectInfo);
 
-      await sendWebhook(
-        session.id,
-        "session.disconnected",
-        disconnectInfo
-      );
+      if (shouldSendEventWebhook("session.disconnected")) {
+        await sendWebhook(
+          session.id,
+          "session.disconnected",
+          disconnectInfo
+        );
+      }
 
       if (code === DisconnectReason.restartRequired) {
         console.warn(`[${session.id}] restartRequired (515) — restarting session`);
@@ -155,11 +166,13 @@ export async function makeSocketForSession(session) {
       }
     }
 
-    await sendWebhook(
-      session.id,
-      "connection.update",
-      serializeBaileysData(update)
-    );
+    if (shouldSendEventWebhook("connection.update")) {
+      await sendWebhook(
+        session.id,
+        "connection.update",
+        serializeBaileysData(update)
+      );
+    }
   });
 
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
@@ -167,6 +180,7 @@ export async function makeSocketForSession(session) {
 
     session.lastActivity = Date.now();
 
+    // Cache messages and contacts
     for (const m of messages) {
       if (m?.key?.id) caches.messages.set(m.key.id, m);
       if (m?.pushName && m?.key?.remoteJid) {
@@ -177,44 +191,61 @@ export async function makeSocketForSession(session) {
       }
     }
 
-    await sendWebhook(
-      session.id,
-      "messages.upsert",
-      serializeBaileysData({ type, messages })
-    );
+    // Apply filters before sending webhook
+    if (shouldSendEventWebhook("messages.upsert")) {
+      const filteredMessages = filterMessages(messages);
+
+      if (filteredMessages.length > 0) {
+        await sendWebhook(
+          session.id,
+          "messages.upsert",
+          serializeBaileysData({ type, messages: filteredMessages })
+        );
+      } else {
+        console.log(`[${session.id}] All messages filtered out, webhook not sent`);
+      }
+    }
   });
 
   sock.ev.on("message-receipt.update", async (updates) => {
-    await sendWebhook(
-      session.id,
-      "message-receipt.update",
-      serializeBaileysData(updates)
-    );
+    if (shouldSendEventWebhook("message-receipt.update")) {
+      await sendWebhook(
+        session.id,
+        "message-receipt.update",
+        serializeBaileysData(updates)
+      );
+    }
   });
 
   sock.ev.on("messages.update", async (updates) => {
-    await sendWebhook(
-      session.id,
-      "messages.update",
-      serializeBaileysData(updates)
-    );
+    if (shouldSendEventWebhook("messages.update")) {
+      await sendWebhook(
+        session.id,
+        "messages.update",
+        serializeBaileysData(updates)
+      );
+    }
   });
 
   sock.ev.on("messages.reaction", async (reactions) => {
-    await sendWebhook(
-      session.id,
-      "messages.reaction",
-      serializeBaileysData(reactions)
-    );
+    if (shouldSendEventWebhook("messages.reaction")) {
+      await sendWebhook(
+        session.id,
+        "messages.reaction",
+        serializeBaileysData(reactions)
+      );
+    }
   });
 
   sock.ev.on("contacts.upsert", async (contacts) => {
     contacts?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
-    await sendWebhook(
-      session.id,
-      "contacts.upsert",
-      serializeBaileysData(contacts)
-    );
+    if (shouldSendEventWebhook("contacts.upsert")) {
+      await sendWebhook(
+        session.id,
+        "contacts.upsert",
+        serializeBaileysData(contacts)
+      );
+    }
   });
 
   sock.ev.on("contacts.update", async (updates) => {
@@ -226,11 +257,13 @@ export async function makeSocketForSession(session) {
           ...c,
         })
     );
-    await sendWebhook(
-      session.id,
-      "contacts.update",
-      serializeBaileysData(updates)
-    );
+    if (shouldSendEventWebhook("contacts.update")) {
+      await sendWebhook(
+        session.id,
+        "contacts.update",
+        serializeBaileysData(updates)
+      );
+    }
   });
 
   sock.ev.on("messaging-history.set", async (history) => {
@@ -238,20 +271,24 @@ export async function makeSocketForSession(session) {
       history.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
     }
 
-    await sendWebhook(
-      session.id,
-      "messaging-history.set",
-      serializeBaileysData(history)
-    );
+    if (shouldSendEventWebhook("messaging-history.set")) {
+      await sendWebhook(
+        session.id,
+        "messaging-history.set",
+        serializeBaileysData(history)
+      );
+    }
   });
 
   sock.ev.on("groups.upsert", async (groups) => {
     groups?.forEach((g) => g?.id && caches.groups.set(g.id, g));
-    await sendWebhook(
-      session.id,
-      "groups.upsert",
-      serializeBaileysData(groups)
-    );
+    if (shouldSendEventWebhook("groups.upsert")) {
+      await sendWebhook(
+        session.id,
+        "groups.upsert",
+        serializeBaileysData(groups)
+      );
+    }
   });
 
   sock.ev.on("groups.update", async (updates) => {
@@ -263,67 +300,85 @@ export async function makeSocketForSession(session) {
           ...g,
         })
     );
-    await sendWebhook(
-      session.id,
-      "groups.update",
-      serializeBaileysData(updates)
-    );
+    if (shouldSendEventWebhook("groups.update")) {
+      await sendWebhook(
+        session.id,
+        "groups.update",
+        serializeBaileysData(updates)
+      );
+    }
   });
 
   sock.ev.on("group-participants.update", async (update) => {
-    await sendWebhook(
-      session.id,
-      "group-participants.update",
-      serializeBaileysData(update)
-    );
+    if (shouldSendEventWebhook("group-participants.update")) {
+      await sendWebhook(
+        session.id,
+        "group-participants.update",
+        serializeBaileysData(update)
+      );
+    }
   });
 
   sock.ev.on("presence.update", async (update) => {
-    await sendWebhook(
-      session.id,
-      "presence.update",
-      serializeBaileysData(update)
-    );
+    if (shouldSendEventWebhook("presence.update")) {
+      await sendWebhook(
+        session.id,
+        "presence.update",
+        serializeBaileysData(update)
+      );
+    }
   });
 
   sock.ev.on("chats.upsert", async (chats) => {
-    await sendWebhook(session.id, "chats.upsert", serializeBaileysData(chats));
+    if (shouldSendEventWebhook("chats.upsert")) {
+      await sendWebhook(session.id, "chats.upsert", serializeBaileysData(chats));
+    }
   });
 
   sock.ev.on("chats.update", async (updates) => {
-    await sendWebhook(
-      session.id,
-      "chats.update",
-      serializeBaileysData(updates)
-    );
+    if (shouldSendEventWebhook("chats.update")) {
+      await sendWebhook(
+        session.id,
+        "chats.update",
+        serializeBaileysData(updates)
+      );
+    }
   });
 
   sock.ev.on("chats.delete", async (deletions) => {
-    await sendWebhook(
-      session.id,
-      "chats.delete",
-      serializeBaileysData(deletions)
-    );
+    if (shouldSendEventWebhook("chats.delete")) {
+      await sendWebhook(
+        session.id,
+        "chats.delete",
+        serializeBaileysData(deletions)
+      );
+    }
   });
 
   sock.ev.on("messages.delete", async (deletions) => {
-    await sendWebhook(
-      session.id,
-      "messages.delete",
-      serializeBaileysData(deletions)
-    );
+    if (shouldSendEventWebhook("messages.delete")) {
+      await sendWebhook(
+        session.id,
+        "messages.delete",
+        serializeBaileysData(deletions)
+      );
+    }
   });
 
   sock.ev.on("call", async (calls) => {
-    await sendWebhook(session.id, "call", serializeBaileysData(calls));
+    if (shouldSendEventWebhook("call")) {
+      await sendWebhook(session.id, "call", serializeBaileysData(calls));
+    }
   });
 
   sock.ev.on("blocklist.update", async (update) => {
-    await sendWebhook(
-      session.id,
-      "blocklist.update",
-      serializeBaileysData(update)
-    );
+    if (shouldSendEventWebhook("blocklist.update")) {
+      await sendWebhook(
+        session.id,
+        "blocklist.update",
+        serializeBaileysData(update)
+      );
+    }
   });
 
   sock.__send = async (payload = {}) => {

@@ -8,6 +8,14 @@ export const AUTH_BASE_DIR = process.env.AUTH_BASE_DIR || "./auth";
 export const SHOW_QR_IN_TERMINAL =
   process.env.SHOW_QR_IN_TERMINAL === "false" ? false : true;
 
+// Webhook Filters
+export const WEBHOOK_SKIP_STATUS = process.env.WEBHOOK_SKIP_STATUS !== "false";
+export const WEBHOOK_SKIP_GROUPS = process.env.WEBHOOK_SKIP_GROUPS === "false";
+export const WEBHOOK_SKIP_CHANNELS = process.env.WEBHOOK_SKIP_CHANNELS !== "false";
+export const WEBHOOK_SKIP_BLOCKED = process.env.WEBHOOK_SKIP_BLOCKED === "false";
+export const WEBHOOK_ALLOWED_EVENTS = process.env.WEBHOOK_ALLOWED_EVENTS || "";
+export const WEBHOOK_DENIED_EVENTS = process.env.WEBHOOK_DENIED_EVENTS || "";
+
 if (!WEBHOOK_URL) {
   console.warn(
     "[config] WEBHOOK_URL not defined; webhooks will have no destination."
@@ -34,3 +42,13 @@ if (!WEBHOOK_AUTH_TYPE) {
     `[config] WEBHOOK_AUTH_TYPE is set to unknown value '${WEBHOOK_AUTH_TYPE}'; webhooks will be sent without authentication.`
   );
 }
+
+// Log filter configuration
+console.log("[config] Webhook Filters:", {
+  skipStatus: WEBHOOK_SKIP_STATUS,
+  skipGroups: WEBHOOK_SKIP_GROUPS,
+  skipChannels: WEBHOOK_SKIP_CHANNELS,
+  skipBlocked: WEBHOOK_SKIP_BLOCKED,
+  allowedEvents: WEBHOOK_ALLOWED_EVENTS || "all",
+  deniedEvents: WEBHOOK_DENIED_EVENTS || "none",
+});

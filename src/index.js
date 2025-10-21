@@ -6,6 +6,7 @@ import { router as messagesRouter } from "./messages/routes.js";
 import { router as contactsRouter } from "./contacts/routes.js";
 import { restoreAllSessions } from "./sessions/bootstrap.js";
 import { webhookQueue } from "./services/webhook.js";
+import { getFilterConfig } from "./services/webhook-filter.js";
 import { redisPool } from "./services/redis-pool.js";
 import {
   authenticateApiKey,
@@ -13,7 +14,6 @@ import {
   errorHandler,
   generalLimiter,
 } from "./middleware/validation.js";
-
 class PerformanceMonitor {
   constructor() {
     this.metrics = {
@@ -71,7 +71,7 @@ class PerformanceMonitor {
       errorRate:
         this.metrics.requests > 0
           ? ((this.metrics.errors / this.metrics.requests) * 100).toFixed(2) +
-            "%"
+          "%"
           : "0%",
     };
   }
@@ -170,6 +170,22 @@ app.get("/admin/metrics", (req, res) => {
   res.json(monitor.getMetrics());
 });
 
+app.get("/admin/webhook-filters", (req, res) => {
+  const config = getFilterConfig();
+  res.json({
+    ok: true,
+    filters: config,
+    examples: {
+      skipStatus: "Set WEBHOOK_SKIP_STATUS=false to include status/broadcast messages",
+      skipGroups: "Set WEBHOOK_SKIP_GROUPS=true to exclude group messages",
+      skipChannels: "Set WEBHOOK_SKIP_CHANNELS=false to include channel messages",
+      allowedEvents: "Set WEBHOOK_ALLOWED_EVENTS=messages.upsert,session.connected to whitelist events",
+      deniedEvents: "Set WEBHOOK_DENIED_EVENTS=presence.update,typing to blacklist events",
+    }
+  });
+});
+
+
 app.get("/admin/webhook-stats", async (req, res) => {
   const stats = await webhookQueue.getStats();
   res.json(stats);
@@ -243,11 +259,11 @@ const server = app.listen(PORT, async () => {
     ║  Port: ${PORT.toString().padEnd(32)}║
     ║  Environment: ${(process.env.NODE_ENV || "production").padEnd(25)}║
     ║  Redis: ${(process.env.REDIS_URL ? "Connected" : "Not configured").padEnd(
-      31
-    )}║
+    31
+  )}║
     ║  Webhooks: ${(process.env.WEBHOOK_URL ? "Enabled" : "Disabled").padEnd(
-      28
-    )}║
+    28
+  )}║
     ╚════════════════════════════════════════╝
   `);
 
