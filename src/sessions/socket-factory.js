@@ -85,7 +85,32 @@ export async function makeSocketForSession(session) {
         );
       }
     }
-    if (connection === "open") session.lastQR = null;
+
+    if (connection === "open") {
+      session.lastQR = null;
+      session.connectedAt = Date.now();
+      session.lastActivity = Date.now();
+
+      const accountInfo = {
+        sessionId: session.id,
+        status: "open",
+        connectedAt: session.connectedAt,
+        phone: state.creds?.me?.id || null,
+        name: state.creds?.me?.name || null,
+        platform: state.creds?.platform || null,
+        deviceManufacturer: state.creds?.deviceManufacturer || null,
+        deviceModel: state.creds?.deviceModel || null,
+        osVersion: state.creds?.osVersion || null,
+      };
+
+      console.log(`[${session.id}] ✅ Session connected successfully:`, accountInfo);
+
+      await sendWebhook(
+        session.id,
+        "session.connected",
+        accountInfo
+      );
+    }
 
     const code = lastDisconnect?.error?.output?.statusCode;
     if (connection === "close" && code === DisconnectReason.restartRequired) {
@@ -105,6 +130,8 @@ export async function makeSocketForSession(session) {
 
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (!messages?.length) return;
+
+    session.lastActivity = Date.now();
 
     for (const m of messages) {
       if (m?.key?.id) caches.messages.set(m.key.id, m);
@@ -299,15 +326,15 @@ export async function makeSocketForSession(session) {
 
     const mentionedJid = Array.isArray(mentions)
       ? mentions.map((m) =>
-          /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
-        )
+        /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
+      )
       : undefined;
 
     const media = base64
       ? Buffer.from(base64, "base64")
       : url
-      ? { url }
-      : undefined;
+        ? { url }
+        : undefined;
 
     let content;
 
@@ -320,10 +347,10 @@ export async function makeSocketForSession(session) {
         const sendAsDocument = quality === "hd" || quality === "original";
         content = sendAsDocument
           ? {
-              document: media,
-              mimetype: mimetype || "image/jpeg",
-              fileName: fileName || "image.jpg",
-            }
+            document: media,
+            mimetype: mimetype || "image/jpeg",
+            fileName: fileName || "image.jpg",
+          }
           : { image: media, caption, mimetype };
         if (viewOnce) content.viewOnce = true;
         break;
@@ -333,10 +360,10 @@ export async function makeSocketForSession(session) {
         const sendAsDocument = quality === "hd" || quality === "original";
         content = sendAsDocument
           ? {
-              document: media,
-              mimetype: mimetype || "video/mp4",
-              fileName: fileName || "video.mp4",
-            }
+            document: media,
+            mimetype: mimetype || "video/mp4",
+            fileName: fileName || "video.mp4",
+          }
           : { video: media, caption, mimetype, gifPlayback: !!gifPlayback };
         if (viewOnce) content.viewOnce = true;
         break;
@@ -408,6 +435,8 @@ export async function makeSocketForSession(session) {
       content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
     }
 
+    session.lastActivity = Date.now();
+
     return await sock.sendMessage(jid, content, sendOpts);
   };
 
@@ -426,7 +455,7 @@ export async function makeSocketForSession(session) {
     let profilePictureUrl;
     try {
       profilePictureUrl = await sock.profilePictureUrl(jid, "image");
-    } catch {}
+    } catch { }
     const cached = cachesRef.contacts.get(jid);
     return {
       id: jid,
