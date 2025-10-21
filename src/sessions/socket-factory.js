@@ -79,11 +79,23 @@ export async function makeSocketForSession(session) {
 
       session.lastQR = qr;
       session.qrGeneratedAt = Date.now();
+
       if (SHOW_QR_IN_TERMINAL) {
         console.log(
           await QRCode.toString(qr, { type: "terminal", small: true })
         );
       }
+
+      await sendWebhook(
+        session.id,
+        "qr.updated",
+        {
+          sessionId: session.id,
+          qr: qr,
+          generatedAt: session.qrGeneratedAt,
+          expiresAt: session.qrGeneratedAt + 60000, // ~60s
+        }
+      );
     }
 
     if (connection === "open") {
@@ -112,13 +124,35 @@ export async function makeSocketForSession(session) {
       );
     }
 
-    const code = lastDisconnect?.error?.output?.statusCode;
-    if (connection === "close" && code === DisconnectReason.restartRequired) {
-      console.warn(
-        `[${session.id}] restartRequired (515) — restarting session`
+    if (connection === "close") {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const reason = lastDisconnect?.error?.output?.payload?.error || "unknown";
+
+      const disconnectInfo = {
+        sessionId: session.id,
+        status: "close",
+        disconnectedAt: Date.now(),
+        reason: reason,
+        statusCode: code,
+        isLoggedOut: code === DisconnectReason.loggedOut,
+        needsReconnect: code === DisconnectReason.restartRequired,
+        connectionLost: code === DisconnectReason.connectionLost,
+        timedOut: code === DisconnectReason.timedOut,
+      };
+
+      console.log(`[${session.id}] ❌ Session disconnected:`, disconnectInfo);
+
+      await sendWebhook(
+        session.id,
+        "session.disconnected",
+        disconnectInfo
       );
-      await restartSession(session.id);
-      return;
+
+      if (code === DisconnectReason.restartRequired) {
+        console.warn(`[${session.id}] restartRequired (515) — restarting session`);
+        await restartSession(session.id);
+        return;
+      }
     }
 
     await sendWebhook(
