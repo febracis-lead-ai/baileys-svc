@@ -139,21 +139,21 @@ class RateLimiter {
 }
 
 export const generalLimiter = new RateLimiter({
-  windowMs: 60000,
-  max: 100,
+  windowMs: parseInt(process.env.GENERAL_WINDOW_MS) || 60000,
+  max: parseInt(process.env.GENERAL_MAX) || 100,
   keyPrefix: "rate:general:",
 });
 
 export const messageLimiter = new RateLimiter({
-  windowMs: 60000,
-  max: 30,
+  windowMs: parseInt(process.env.MESSAGE_WINDOW_MS) || 60000,
+  max: parseInt(process.env.MESSAGE_MAX) || 30,
   keyPrefix: "rate:message:",
   skipSuccessfulRequests: true,
 });
 
 export const authLimiter = new RateLimiter({
-  windowMs: 300000,
-  max: 5,
+  windowMs: parseInt(process.env.AUTH_WINDOW_MS) || 300000,
+  max: parseInt(process.env.AUTH_MAX) || 5,
   keyPrefix: "rate:auth:",
 });
 
