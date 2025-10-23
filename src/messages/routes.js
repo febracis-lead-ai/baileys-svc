@@ -7,7 +7,8 @@ router.post("/:id/send", async (req, res) => {
   try {
     const s = await getOrEnsureSession(req.params.id);
     const sent = await s.sock.__send(req.body);
-    res.json({ ok: true, key: sent?.key });
+
+    res.json(sent);
   } catch (e) {
     res.status(400).json({ ok: false, error: String(e) });
   }
