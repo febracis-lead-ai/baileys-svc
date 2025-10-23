@@ -180,7 +180,6 @@ export async function makeSocketForSession(session) {
 
     session.lastActivity = Date.now();
 
-    // Cache messages and contacts
     for (const m of messages) {
       if (m?.key?.id) caches.messages.set(m.key.id, m);
       if (m?.pushName && m?.key?.remoteJid) {
@@ -191,7 +190,6 @@ export async function makeSocketForSession(session) {
       }
     }
 
-    // Apply filters before sending webhook
     if (shouldSendEventWebhook("messages.upsert")) {
       const filteredMessages = filterMessages(messages);
 
@@ -208,21 +206,79 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("message-receipt.update", async (updates) => {
+    if (!Array.isArray(updates)) updates = [updates];
+
+    const processedUpdates = updates.map(update => {
+      const { key, receipt } = update;
+      const timestamp = new Date().toISOString();
+
+      const processed = {
+        key: {
+          remoteJid: key.remoteJid,
+          id: key.id,
+          participant: key.participant,
+          fromMe: key.fromMe
+        },
+        receipt: {
+          readTimestamp: receipt?.readTimestamp
+            ? new Date(receipt.readTimestamp * 1000).toISOString()
+            : null,
+          deliveredTimestamp: receipt?.deliveredTimestamp
+            ? new Date(receipt.deliveredTimestamp * 1000).toISOString()
+            : null,
+          playedTimestamp: receipt?.playedTimestamp
+            ? new Date(receipt.playedTimestamp * 1000).toISOString()
+            : null,
+          userJid: receipt?.userJid,
+        },
+        timestamp
+      };
+
+      console.log(`[${session.id}] Receipt update for message ${key.id}:`, processed.receipt);
+
+      return processed;
+    });
+
     if (shouldSendEventWebhook("message-receipt.update")) {
       await sendWebhook(
         session.id,
         "message-receipt.update",
-        serializeBaileysData(updates)
+        processedUpdates
       );
     }
   });
 
   sock.ev.on("messages.update", async (updates) => {
+    if (!Array.isArray(updates)) updates = [updates];
+
+    const processedUpdates = updates.map(update => {
+      const { key, update: updateData } = update;
+      const statusCode = updateData?.status;
+      const timestamp = new Date().toISOString();
+
+      const processed = {
+        key: {
+          remoteJid: key.remoteJid,
+          id: key.id,
+          participant: key.participant,
+          fromMe: key.fromMe
+        },
+        update: {
+          statusCode: statusCode,
+          timestamp
+        }
+      };
+
+      console.log(`[${session.id}] Status update for message ${key.id}: statusCode=${statusCode}`);
+
+      return processed;
+    });
+
     if (shouldSendEventWebhook("messages.update")) {
       await sendWebhook(
         session.id,
         "messages.update",
-        serializeBaileysData(updates)
+        processedUpdates
       );
     }
   });
