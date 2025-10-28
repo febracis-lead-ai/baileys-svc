@@ -2,13 +2,13 @@
   "name": "baileys-svc",
   "type": "module",
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.5",
-    "axios": "^1.7.2",
+    "@whiskeysockets/baileys": "^7.0.0-rc.6",
+    "axios": "^1.13.0",
     "compression": "^1.8.1",
-    "express": "^4.19.2",
-    "ioredis": "^5.8.1",
+    "express": "^4.21.2",
+    "ioredis": "^5.8.2",
     "node-cache": "^5.1.2",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.4"
   },
   "scripts": {
     "dev": "bun run --hot src/index.js",
