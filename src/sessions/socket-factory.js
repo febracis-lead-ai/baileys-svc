@@ -609,5 +609,10 @@ export async function makeSocketForSession(session) {
     };
   };
 
+  sock.__typing = async (to, state = "composing") => {
+    const jid = toJid(to);
+    await sock.sendPresenceUpdate(state, jid);
+  };
+
   return sock;
 }

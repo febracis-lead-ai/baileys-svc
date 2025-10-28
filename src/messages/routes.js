@@ -14,6 +14,41 @@ router.post("/:id/send", async (req, res) => {
   }
 });
 
+router.post("/:id/typing", async (req, res) => {
+  try {
+    const s = await getOrEnsureSession(req.params.id);
+    const { to, state } = req.body;
+
+    if (!to) {
+      return res.status(400).json({
+        ok: false,
+        error: "Recipient 'to' is required"
+      });
+    }
+
+    const validStates = ["composing", "paused", "recording", "available"];
+    const typingState = state || "composing";
+
+    if (!validStates.includes(typingState)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid state. Use: ${validStates.join(", ")}`
+      });
+    }
+
+    await s.sock.__typing(to, typingState);
+
+    res.json({
+      ok: true,
+      to,
+      state: typingState,
+      message: "Presence updated successfully"
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e) });
+  }
+});
+
 router.post("/:id/ack/read", async (req, res) => {
   try {
     const s = await getOrEnsureSession(req.params.id);
