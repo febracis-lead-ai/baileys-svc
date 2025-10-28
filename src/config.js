@@ -8,6 +8,13 @@ export const AUTH_BASE_DIR = process.env.AUTH_BASE_DIR || "./auth";
 export const SHOW_QR_IN_TERMINAL =
   process.env.SHOW_QR_IN_TERMINAL === "false" ? false : true;
 
+// Redis Configuration
+export const REDIS_HOST = process.env.REDIS_HOST || "redis";
+export const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379", 10);
+export const REDIS_DB = parseInt(process.env.REDIS_DB || "0", 10);
+export const REDIS_PASSWORD = process.env.REDIS_PASSWORD || "";
+export const REDIS_URL = process.env.REDIS_URL || ""; // Fallback compatibility
+
 // Webhook Filters
 export const WEBHOOK_SKIP_STATUS = process.env.WEBHOOK_SKIP_STATUS !== "false";
 export const WEBHOOK_SKIP_GROUPS = process.env.WEBHOOK_SKIP_GROUPS === "false";
@@ -15,6 +22,29 @@ export const WEBHOOK_SKIP_CHANNELS = process.env.WEBHOOK_SKIP_CHANNELS !== "fals
 export const WEBHOOK_SKIP_BLOCKED = process.env.WEBHOOK_SKIP_BLOCKED === "false";
 export const WEBHOOK_ALLOWED_EVENTS = process.env.WEBHOOK_ALLOWED_EVENTS || "";
 export const WEBHOOK_DENIED_EVENTS = process.env.WEBHOOK_DENIED_EVENTS || "";
+
+/**
+ * Get Redis connection options
+ */
+export function getRedisConfig() {
+  // If REDIS_URL is provided and specific variables are not, use REDIS_URL
+  if (REDIS_URL && !process.env.REDIS_HOST) {
+    return REDIS_URL;
+  }
+
+  // Build configuration object from individual variables
+  const config = {
+    host: REDIS_HOST,
+    port: REDIS_PORT,
+    db: REDIS_DB,
+  };
+
+  if (REDIS_PASSWORD) {
+    config.password = REDIS_PASSWORD;
+  }
+
+  return config;
+}
 
 if (!WEBHOOK_URL) {
   console.warn(
@@ -42,6 +72,14 @@ if (!WEBHOOK_AUTH_TYPE) {
     `[config] WEBHOOK_AUTH_TYPE is set to unknown value '${WEBHOOK_AUTH_TYPE}'; webhooks will be sent without authentication.`
   );
 }
+
+// Log Redis configuration
+console.log("[config] Redis:", {
+  host: REDIS_HOST,
+  port: REDIS_PORT,
+  db: REDIS_DB,
+  hasPassword: !!REDIS_PASSWORD,
+});
 
 // Log filter configuration
 console.log("[config] Webhook Filters:", {

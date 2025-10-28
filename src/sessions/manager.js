@@ -8,10 +8,7 @@ export const sessions = new Map(); // sessionId -> { id, sock, state, saveCreds,
 export async function ensureSession(sessionId) {
   if (sessions.has(sessionId)) return sessions.get(sessionId);
 
-  const { state, saveCreds, redis } = await useRedisAuthState(
-    sessionId,
-    process.env.REDIS_URL
-  );
+  const { state, saveCreds, redis } = await useRedisAuthState(sessionId);
 
   const s = {
     id: sessionId,
@@ -49,7 +46,7 @@ export async function restartSession(sessionId) {
   if (s.sock?.ws?.close) {
     try {
       s.sock.ws.close(1000, "restart requested");
-    } catch {}
+    } catch { }
   }
   s.sock = await makeSocketForSession(s);
   return s;
@@ -60,7 +57,7 @@ export async function logoutSession(sessionId) {
   if (s.sock) {
     try {
       await s.sock.logout();
-    } catch {}
+    } catch { }
   }
   sessions.delete(sessionId);
 

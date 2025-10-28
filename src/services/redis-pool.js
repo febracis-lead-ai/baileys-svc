@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { getRedisConfig } from "../config.js";
 
 class RedisPool {
   constructor() {
@@ -11,9 +12,9 @@ class RedisPool {
       return this.instance;
     }
 
-    const redisUrl = process.env.REDIS_URL || "redis://redis:6379";
+    const redisConfig = getRedisConfig();
 
-    this.instance = new Redis(redisUrl, {
+    const options = {
       maxRetriesPerRequest: 3,
       enableReadyCheck: true,
       connectTimeout: 10000,
@@ -22,11 +23,22 @@ class RedisPool {
       lazyConnect: false,
       keepAlive: 10000,
       connectionName: "baileys-svc",
-      db: parseInt(process.env.REDIS_DB || "0"),
-    });
+    };
+
+    if (typeof redisConfig === "string") {
+      this.instance = new Redis(redisConfig, options);
+    } else {
+      this.instance = new Redis({
+        ...redisConfig,
+        ...options,
+      });
+    }
 
     this.instance.on("connect", () => {
-      console.log(`[RedisPool] Connected to ${redisUrl}`);
+      const connInfo = typeof redisConfig === "string"
+        ? redisConfig
+        : `${redisConfig.host}:${redisConfig.port}/${redisConfig.db}`;
+      console.log(`[RedisPool] Connected to ${connInfo}`);
       this.isConnected = true;
     });
 

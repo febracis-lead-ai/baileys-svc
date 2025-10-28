@@ -1,5 +1,6 @@
 import Redis from "ioredis";
 import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
+import { getRedisConfig } from "../config.js";
 
 /**
  * Redis-backed Baileys auth state (creds + signal keys).
@@ -8,11 +9,10 @@ import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
  * - SCAN for clears (avoids KEYS)
  * - Tolerates slow start with retryStrategy
  */
-export async function useRedisAuthState(
-  sessionId,
-  redisUrl = "redis://redis:6379"
-) {
-  const redis = new Redis(redisUrl, {
+export async function useRedisAuthState(sessionId) {
+  const redisConfig = getRedisConfig();
+
+  const options = {
     maxRetriesPerRequest: null,
     enableReadyCheck: true,
     connectTimeout: 10_000,
@@ -20,14 +20,23 @@ export async function useRedisAuthState(
       const delay = Math.min(times * 200, 5000);
       return delay;
     },
+  };
+
+  const redis = typeof redisConfig === "string"
+    ? new Redis(redisConfig, options)
+    : new Redis({ ...redisConfig, ...options });
+
+  redis.on("connect", () => {
+    const connInfo = typeof redisConfig === "string"
+      ? redisConfig
+      : `${redisConfig.host}:${redisConfig.port}/${redisConfig.db}`;
+    console.log(`[Redis] Connected: ${connInfo} (session=${sessionId})`);
   });
 
-  redis.on("connect", () =>
-    console.log(`[Redis] Connected: ${redisUrl} (session=${sessionId})`)
-  );
   redis.on("error", (err) =>
     console.error(`[Redis Error] session=${sessionId}`, err?.message || err)
   );
+
   redis.on("close", () =>
     console.warn(`[Redis] Closed (session=${sessionId})`)
   );

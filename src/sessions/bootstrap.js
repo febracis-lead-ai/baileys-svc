@@ -1,5 +1,6 @@
 import Redis from "ioredis";
 import { ensureSession } from "./manager.js";
+import { getRedisConfig } from "../config.js";
 
 function sessionIdFromKey(k) {
   // k: "wa:<sessionId>:<qualquerCoisa>"
@@ -10,17 +11,24 @@ function sessionIdFromKey(k) {
 /**
  * Reinicia TODAS as sessões encontradas no Redis (qualquer chave "wa:<sessionId>:*").
  */
-export async function restoreAllSessions(redisUrl = process.env.REDIS_URL) {
-  if (!redisUrl) {
-    console.warn("[bootstrap] REDIS_URL não definido; pulando restore.");
+export async function restoreAllSessions() {
+  const redisConfig = getRedisConfig();
+
+  if (!redisConfig) {
+    console.warn("[bootstrap] Redis não configurado; pulando restore.");
     return;
   }
 
-  const redis = new Redis(redisUrl, {
+  const options = {
     enableReadyCheck: true,
     maxRetriesPerRequest: null,
     retryStrategy: (times) => Math.min(times * 200, 5000),
-  });
+  };
+
+  // Create Redis instance based on config type
+  const redis = typeof redisConfig === "string"
+    ? new Redis(redisConfig, options)
+    : new Redis({ ...redisConfig, ...options });
 
   await new Promise((res) => redis.once("ready", res));
 
