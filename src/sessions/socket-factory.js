@@ -68,31 +68,29 @@ export async function makeSocketForSession(session) {
 
   sock.ev.on("creds.update", saveCreds);
 
+  /**
+   * Event: connection.update
+   * 
+   * According to Baileys official docs:
+   * - This event is the ONLY source of truth for connection status
+   * - connection field values: "open" | "connecting" | "close"
+   * - ws.readyState should NOT be used
+   * 
+   * Source: https://baileys.wiki/docs/socket/connecting/
+   */
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { connection, lastDisconnect, qr, isNewLogin } = update;
 
-    const wsState = sock?.ws?.readyState;
-    const hasAuth = !!state.creds?.me?.id;
-
-    console.log(`[${session.id}] Connection update:`, {
+    console.log(`[${session.id}] connection.update event:`, {
       connection,
       hasQR: !!qr,
-      qrLength: qr?.length,
-      wsState,
-      hasAuth,
+      isNewLogin,
+      hasLastDisconnect: !!lastDisconnect,
     });
 
-    if (connection === "open") {
-      session.status = "open";
-    } else if (connection === "close") {
-      session.status = "close";
-    } else if (connection === "connecting") {
-      session.status = "connecting";
-    } else if (connection) {
+    if (connection) {
       session.status = connection;
-    }
-    else if (wsState === 3 || wsState === undefined) {
-      session.status = "close";
+      console.log(`[${session.id}] Status updated to: ${connection}`);
     }
 
     if (qr) {
@@ -130,6 +128,7 @@ export async function makeSocketForSession(session) {
         sessionId: session.id,
         status: "open",
         connectedAt: session.connectedAt,
+        isNewLogin: isNewLogin || false,
         phone: state.creds?.me?.id || null,
         name: state.creds?.me?.name || null,
         platform: state.creds?.platform || null,
@@ -138,7 +137,7 @@ export async function makeSocketForSession(session) {
         osVersion: state.creds?.osVersion || null,
       };
 
-      console.log(`[${session.id}] ✅ Session connected successfully:`, accountInfo);
+      console.log(`[${session.id}] ✅ Session opened successfully:`, accountInfo);
 
       if (shouldSendEventWebhook("session.connected")) {
         await sendWebhook(
@@ -165,7 +164,7 @@ export async function makeSocketForSession(session) {
         timedOut: code === DisconnectReason.timedOut,
       };
 
-      console.log(`[${session.id}] ❌ Session disconnected:`, disconnectInfo);
+      console.log(`[${session.id}] ❌ Session closed:`, disconnectInfo);
 
       if (shouldSendEventWebhook("session.disconnected")) {
         await sendWebhook(
@@ -180,6 +179,10 @@ export async function makeSocketForSession(session) {
         await restartSession(session.id);
         return;
       }
+    }
+
+    if (connection === "connecting") {
+      console.log(`[${session.id}] 🔄 Session connecting...`);
     }
 
     if (shouldSendEventWebhook("connection.update")) {

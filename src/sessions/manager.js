@@ -3,7 +3,7 @@ import { Browsers } from "@whiskeysockets/baileys";
 import { useRedisAuthState } from "./redis-auth-store.js";
 import { makeSocketForSession } from "./socket-factory.js";
 
-export const sessions = new Map(); // sessionId -> { id, sock, state, saveCreds, caches, lastQR, status }
+export const sessions = new Map();
 
 export async function ensureSession(sessionId) {
   if (sessions.has(sessionId)) return sessions.get(sessionId);
@@ -15,7 +15,7 @@ export async function ensureSession(sessionId) {
     state,
     saveCreds,
     lastQR: null,
-    status: "init",
+    status: "init",  // Will be updated by connection.update event
     caches: {
       groups: new NodeCache({ stdTTL: 300 }),
       messages: new NodeCache({ stdTTL: 6 * 3600, checkperiod: 300 }),
@@ -95,53 +95,155 @@ export function listSessions() {
       status: status.actualStatus,
       isAuthenticated: status.isAuthenticated,
       hasQR: !!s.lastQR,
+      credentialsValid: status.credentialsValid,
     };
   });
 }
 
 /**
- * Get actual session status by checking WebSocket state and credentials
- * This ensures consistency between reported status and actual connection state
+ * Validate if credentials structure is complete
+ * According to Baileys docs, state.creds.me.id must exist
+ */
+function validateCredentials(state) {
+  try {
+    if (!state?.creds?.me?.id) {
+      return {
+        valid: false,
+        reason: "Missing state.creds.me.id (required by Baileys)"
+      };
+    }
+
+    if (typeof state.creds.me.id !== 'string' || state.creds.me.id.length === 0) {
+      return {
+        valid: false,
+        reason: "Invalid state.creds.me.id format"
+      };
+    }
+
+    return {
+      valid: true,
+      reason: "Credentials valid",
+      id: state.creds.me.id,
+      name: state.creds.me.name || null,
+    };
+  } catch (error) {
+    return {
+      valid: false,
+      reason: `Validation error: ${error.message}`,
+    };
+  }
+}
+
+/**
+ * Get session status following Baileys official behavior
+ * 
+ * According to Baileys docs:
+ * - The 'connection' field from connection.update event is the source of truth
+ * - Values: "open" | "connecting" | "close"
+ * - ws.readyState is NOT reliable
+ * 
+ * Source: https://baileys.wiki/docs/socket/connecting/
  */
 export function getActualSessionStatus(session) {
-  const wsState = session.sock?.ws?.readyState;
-  const isWsConnected = wsState === 1; // WebSocket.OPEN = 1
-  const hasAuth = !!session.state?.creds?.me?.id;
+  const credCheck = validateCredentials(session.state);
+  const hasValidCreds = credCheck.valid;
 
-  let actualStatus = session.status;
+  const baileyStatus = session.status;
+
+  let actualStatus = baileyStatus || "close";
   let isAuthenticated = false;
 
-  if (isWsConnected && hasAuth) {
-    // WebSocket is open AND we have authentication credentials
+  if (baileyStatus === "open" && hasValidCreds) {
     actualStatus = "open";
     isAuthenticated = true;
-
-    // Auto-correct session status if out of sync
-    if (session.status !== "open") {
-      console.log(`[${session.id}] Status auto-corrected from '${session.status}' to 'open'`);
-      session.status = "open";
-    }
-  } else if (!isWsConnected) {
-    // WebSocket is not connected
-    actualStatus = "close";
-    isAuthenticated = false;
-
-    // Auto-correct session status if out of sync
-    if (session.status === "open") {
-      console.log(`[${session.id}] Status auto-corrected from 'open' to 'close'`);
-      session.status = "close";
-    }
-  } else if (isWsConnected && !hasAuth) {
-    // WebSocket is open but not authenticated yet (waiting for QR scan or pairing code)
+  } else if (baileyStatus === "connecting") {
     actualStatus = "connecting";
+    isAuthenticated = false;
+  } else if (!hasValidCreds) {
+    actualStatus = "invalid_credentials";
+    isAuthenticated = false;
+  } else {
+    actualStatus = "close";
     isAuthenticated = false;
   }
 
   return {
     actualStatus,
     isAuthenticated,
-    wsState,
-    isWsConnected,
-    hasAuth,
+    credentialsValid: hasValidCreds,
+    credentialsReason: credCheck.reason,
+    baileyStatus,
+    debug: {
+      baileyStatus,
+      hasValidCreds,
+      hasSock: !!session.sock,
+      credentialCheck: credCheck,
+    }
+  };
+}
+
+/**
+ * Test if session can send messages
+ */
+export async function testSessionConnection(session) {
+  try {
+    const credCheck = validateCredentials(session.state);
+
+    if (!credCheck.valid) {
+      return {
+        connected: false,
+        reason: "Invalid credentials",
+        details: credCheck.reason,
+        suggestion: "Use POST /sessions/:id/logout to clear corrupted credentials",
+      };
+    }
+
+    if (session.status !== "open") {
+      return {
+        connected: false,
+        reason: `Session status is '${session.status}', not 'open'`,
+        suggestion: session.status === "close"
+          ? "Try POST /sessions/:id/restart to reconnect"
+          : "Wait for connection to complete",
+      };
+    }
+
+    if (!session.sock || typeof session.sock.sendMessage !== 'function') {
+      return {
+        connected: false,
+        reason: "Socket not properly initialized"
+      };
+    }
+
+    return {
+      connected: true,
+      reason: "All checks passed (Baileys status is 'open')",
+      canSend: true,
+      credentials: {
+        id: credCheck.id,
+        name: credCheck.name,
+      },
+    };
+  } catch (error) {
+    return {
+      connected: false,
+      reason: error.message,
+      error: String(error)
+    };
+  }
+}
+
+/**
+ * Check if session has corrupted credentials
+ */
+export function hasCorruptedCredentials(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return { corrupted: false, reason: "Session not found" };
+
+  const credCheck = validateCredentials(session.state);
+  return {
+    corrupted: !credCheck.valid,
+    reason: credCheck.reason,
+    sessionId: session.id,
   };
 }
