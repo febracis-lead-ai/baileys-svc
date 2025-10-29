@@ -6,6 +6,7 @@ import {
   getOrEnsureSession,
   getSession,
   restartSession,
+  getActualSessionStatus,
 } from "./manager.js";
 import {
   validateSessionId,
@@ -28,10 +29,13 @@ router.post(
   async (req, res, next) => {
     try {
       const session = await ensureSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
+
       res.json({
         ok: true,
         id: session.id,
-        status: session.status,
+        status: statusCheck.actualStatus,
+        isAuthenticated: statusCheck.isAuthenticated,
         message: "Session initialized successfully",
       });
     } catch (error) {
@@ -54,7 +58,7 @@ router.get("/", generalLimiter.getMiddleware(), (_req, res) => {
 });
 
 /**
- * Get session status
+ * Get session status with real-time WebSocket verification
  * @route GET /sessions/:id/status
  */
 router.get(
@@ -63,16 +67,26 @@ router.get(
   async (req, res, next) => {
     try {
       const session = await getOrEnsureSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
 
-      // Include more detailed status information
       const statusInfo = {
         ok: true,
         id: session.id,
-        status: session.status,
+        status: statusCheck.actualStatus,
         hasQR: !!session.lastQR,
-        isAuthenticated: session.status === "open",
+        isAuthenticated: statusCheck.isAuthenticated,
         connectedAt: session.connectedAt || null,
         lastActivity: session.lastActivity || null,
+        websocket: {
+          state: statusCheck.wsState,
+          isConnected: statusCheck.isWsConnected,
+          stateText: getWebSocketStateText(statusCheck.wsState),
+        },
+        credentials: {
+          hasAuth: statusCheck.hasAuth,
+          phone: session.state?.creds?.me?.id || null,
+          name: session.state?.creds?.me?.name || null,
+        },
       };
 
       res.json(statusInfo);
@@ -89,12 +103,14 @@ router.get(
 router.get("/:id/qr", authLimiter.getMiddleware(), async (req, res, next) => {
   try {
     const session = await getOrEnsureSession(req.params.id);
+    const statusCheck = getActualSessionStatus(session);
 
     // Early return if already connected
-    if (session.status === "open") {
+    if (statusCheck.isAuthenticated) {
       return res.status(400).json({
         ok: false,
         error: "Session already authenticated",
+        status: statusCheck.actualStatus,
       });
     }
 
@@ -105,10 +121,13 @@ router.get("/:id/qr", authLimiter.getMiddleware(), async (req, res, next) => {
     // Poll for QR code
     while (
       !session.lastQR &&
-      session.status !== "open" &&
+      !statusCheck.isAuthenticated &&
       Date.now() - started < timeoutMs
     ) {
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      // Re-check status
+      const newStatus = getActualSessionStatus(session);
+      if (newStatus.isAuthenticated) break;
     }
 
     if (!session.lastQR) {
@@ -116,7 +135,7 @@ router.get("/:id/qr", authLimiter.getMiddleware(), async (req, res, next) => {
         ok: false,
         error:
           "QR code not available. Session may be connecting or already authenticated.",
-        status: session.status,
+        status: statusCheck.actualStatus,
       });
     }
 
@@ -125,7 +144,7 @@ router.get("/:id/qr", authLimiter.getMiddleware(), async (req, res, next) => {
       ok: true,
       qr: session.lastQR,
       format: "raw",
-      expiresAt: new Date(Date.now() + 60000).toISOString(), // QR expires in ~60s
+      expiresAt: new Date(Date.now() + 60000).toISOString(),
     });
   } catch (error) {
     next(error);
@@ -160,12 +179,14 @@ router.post(
       }
 
       const session = await ensureSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
 
       // Check if already authenticated
-      if (session.status === "open") {
+      if (statusCheck.isAuthenticated) {
         return res.status(400).json({
           ok: false,
           error: "Session already authenticated",
+          status: statusCheck.actualStatus,
         });
       }
 
@@ -201,12 +222,13 @@ router.post(
   async (req, res, next) => {
     try {
       const session = getSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
 
-      if (session.status !== "open") {
+      if (!statusCheck.isAuthenticated) {
         return res.status(400).json({
           ok: false,
           error: "Session not connected",
-          status: session.status,
+          status: statusCheck.actualStatus,
         });
       }
 
@@ -236,11 +258,13 @@ router.post(
   async (req, res, next) => {
     try {
       const session = await restartSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
 
       res.json({
         ok: true,
         message: "Session restarted successfully",
-        status: session.status,
+        status: statusCheck.actualStatus,
+        isAuthenticated: statusCheck.isAuthenticated,
       });
     } catch (error) {
       next(error);
@@ -292,11 +316,13 @@ router.get(
   async (req, res, next) => {
     try {
       const session = getSession(req.params.id);
+      const statusCheck = getActualSessionStatus(session);
 
       const metrics = {
         ok: true,
         id: session.id,
-        status: session.status,
+        status: statusCheck.actualStatus,
+        isAuthenticated: statusCheck.isAuthenticated,
         caches: {
           messages: session.caches.messages.getStats(),
           contacts: session.caches.contacts.getStats(),
@@ -304,6 +330,10 @@ router.get(
         },
         uptime: session.connectedAt ? Date.now() - session.connectedAt : null,
         lastActivity: session.lastActivity || null,
+        websocket: {
+          state: statusCheck.wsState,
+          stateText: getWebSocketStateText(statusCheck.wsState),
+        },
       };
 
       res.json(metrics);
@@ -312,3 +342,16 @@ router.get(
     }
   }
 );
+
+/**
+ * Helper function to get WebSocket state as text
+ */
+function getWebSocketStateText(state) {
+  switch (state) {
+    case 0: return "CONNECTING";
+    case 1: return "OPEN";
+    case 2: return "CLOSING";
+    case 3: return "CLOSED";
+    default: return "UNKNOWN";
+  }
+}

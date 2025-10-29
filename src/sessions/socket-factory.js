@@ -71,13 +71,29 @@ export async function makeSocketForSession(session) {
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    const wsState = sock?.ws?.readyState;
+    const hasAuth = !!state.creds?.me?.id;
+
     console.log(`[${session.id}] Connection update:`, {
       connection,
       hasQR: !!qr,
       qrLength: qr?.length,
+      wsState,
+      hasAuth,
     });
 
-    session.status = connection || "close";
+    if (connection === "open") {
+      session.status = "open";
+    } else if (connection === "close") {
+      session.status = "close";
+    } else if (connection === "connecting") {
+      session.status = "connecting";
+    } else if (connection) {
+      session.status = connection;
+    }
+    else if (wsState === 3 || wsState === undefined) {
+      session.status = "close";
+    }
 
     if (qr) {
       console.log(`[${session.id}] 🎯 QR CODE GENERATED! Length: ${qr.length}`);

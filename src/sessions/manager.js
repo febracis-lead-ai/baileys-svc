@@ -88,9 +88,60 @@ export async function logoutSession(sessionId) {
 }
 
 export function listSessions() {
-  return Array.from(sessions.values()).map((s) => ({
-    id: s.id,
-    status: s.status,
-    hasQR: !!s.lastQR,
-  }));
+  return Array.from(sessions.values()).map((s) => {
+    const status = getActualSessionStatus(s);
+    return {
+      id: s.id,
+      status: status.actualStatus,
+      isAuthenticated: status.isAuthenticated,
+      hasQR: !!s.lastQR,
+    };
+  });
+}
+
+/**
+ * Get actual session status by checking WebSocket state and credentials
+ * This ensures consistency between reported status and actual connection state
+ */
+export function getActualSessionStatus(session) {
+  const wsState = session.sock?.ws?.readyState;
+  const isWsConnected = wsState === 1; // WebSocket.OPEN = 1
+  const hasAuth = !!session.state?.creds?.me?.id;
+
+  let actualStatus = session.status;
+  let isAuthenticated = false;
+
+  if (isWsConnected && hasAuth) {
+    // WebSocket is open AND we have authentication credentials
+    actualStatus = "open";
+    isAuthenticated = true;
+
+    // Auto-correct session status if out of sync
+    if (session.status !== "open") {
+      console.log(`[${session.id}] Status auto-corrected from '${session.status}' to 'open'`);
+      session.status = "open";
+    }
+  } else if (!isWsConnected) {
+    // WebSocket is not connected
+    actualStatus = "close";
+    isAuthenticated = false;
+
+    // Auto-correct session status if out of sync
+    if (session.status === "open") {
+      console.log(`[${session.id}] Status auto-corrected from 'open' to 'close'`);
+      session.status = "close";
+    }
+  } else if (isWsConnected && !hasAuth) {
+    // WebSocket is open but not authenticated yet (waiting for QR scan or pairing code)
+    actualStatus = "connecting";
+    isAuthenticated = false;
+  }
+
+  return {
+    actualStatus,
+    isAuthenticated,
+    wsState,
+    isWsConnected,
+    hasAuth,
+  };
 }
