@@ -17,6 +17,10 @@ import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
 
+/**
+ * Serialize Baileys data to JSON-safe format
+ * Handles Buffer, Uint8Array conversions
+ */
 function serializeBaileysData(data) {
   return JSON.parse(
     JSON.stringify(data, (key, value) => {
@@ -43,6 +47,10 @@ function serializeBaileysData(data) {
   );
 }
 
+/**
+ * Create a WhatsApp socket for a session
+ * Follows Baileys v7.0.0-rc.6 standards
+ */
 export async function makeSocketForSession(session) {
   const { state, saveCreds, caches, browser } = session;
 
@@ -66,35 +74,43 @@ export async function makeSocketForSession(session) {
     },
   });
 
+  // ===========================================
+  // AUTHENTICATION & CONNECTION EVENTS
+  // ===========================================
+
+  /**
+   * Event: creds.update
+   * Triggered when authentication credentials are updated
+   * CRITICAL: Must save credentials to prevent message delivery failures
+   */
   sock.ev.on("creds.update", saveCreds);
 
   /**
    * Event: connection.update
+   * Source of truth for connection status according to Baileys docs
+   * Values: "open" | "connecting" | "close"
    * 
-   * According to Baileys official docs:
-   * - This event is the ONLY source of truth for connection status
-   * - connection field values: "open" | "connecting" | "close"
-   * - ws.readyState should NOT be used
-   * 
-   * Source: https://baileys.wiki/docs/socket/connecting/
+   * Reference: https://baileys.wiki/docs/socket/connecting/
    */
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr, isNewLogin } = update;
 
-    console.log(`[${session.id}] connection.update event:`, {
+    console.log(`[${session.id}] connection.update:`, {
       connection,
       hasQR: !!qr,
       isNewLogin,
       hasLastDisconnect: !!lastDisconnect,
     });
 
+    // Update session status based on connection field
     if (connection) {
       session.status = connection;
-      console.log(`[${session.id}] Status updated to: ${connection}`);
+      console.log(`[${session.id}] Status: ${connection}`);
     }
 
+    // Handle QR code generation
     if (qr) {
-      console.log(`[${session.id}] 🎯 QR CODE GENERATED! Length: ${qr.length}`);
+      console.log(`[${session.id}] QR code generated (length: ${qr.length})`);
 
       session.lastQR = qr;
       session.qrGeneratedAt = Date.now();
@@ -105,20 +121,18 @@ export async function makeSocketForSession(session) {
         );
       }
 
+      // Send QR webhook
       if (shouldSendEventWebhook("qr.updated")) {
-        await sendWebhook(
-          session.id,
-          "qr.updated",
-          {
-            sessionId: session.id,
-            qr: qr,
-            generatedAt: session.qrGeneratedAt,
-            expiresAt: session.qrGeneratedAt + 60000,
-          }
-        );
+        await sendWebhook(session.id, "qr.updated", {
+          sessionId: session.id,
+          qr: qr,
+          generatedAt: session.qrGeneratedAt,
+          expiresAt: session.qrGeneratedAt + 60000,
+        });
       }
     }
 
+    // Handle successful connection
     if (connection === "open") {
       session.lastQR = null;
       session.connectedAt = Date.now();
@@ -137,17 +151,14 @@ export async function makeSocketForSession(session) {
         osVersion: state.creds?.osVersion || null,
       };
 
-      console.log(`[${session.id}] ✅ Session opened successfully:`, accountInfo);
+      console.log(`[${session.id}] ✅ Connected:`, accountInfo);
 
       if (shouldSendEventWebhook("session.connected")) {
-        await sendWebhook(
-          session.id,
-          "session.connected",
-          accountInfo
-        );
+        await sendWebhook(session.id, "session.connected", accountInfo);
       }
     }
 
+    // Handle disconnection
     if (connection === "close") {
       const code = lastDisconnect?.error?.output?.statusCode;
       const reason = lastDisconnect?.error?.output?.payload?.error || "unknown";
@@ -164,27 +175,26 @@ export async function makeSocketForSession(session) {
         timedOut: code === DisconnectReason.timedOut,
       };
 
-      console.log(`[${session.id}] ❌ Session closed:`, disconnectInfo);
+      console.log(`[${session.id}] ❌ Disconnected:`, disconnectInfo);
 
       if (shouldSendEventWebhook("session.disconnected")) {
-        await sendWebhook(
-          session.id,
-          "session.disconnected",
-          disconnectInfo
-        );
+        await sendWebhook(session.id, "session.disconnected", disconnectInfo);
       }
 
+      // Auto-restart if required by WhatsApp
       if (code === DisconnectReason.restartRequired) {
-        console.warn(`[${session.id}] restartRequired (515) — restarting session`);
+        console.warn(`[${session.id}] Restart required, restarting...`);
         await restartSession(session.id);
         return;
       }
     }
 
+    // Handle connecting state
     if (connection === "connecting") {
-      console.log(`[${session.id}] 🔄 Session connecting...`);
+      console.log(`[${session.id}] 🔄 Connecting...`);
     }
 
+    // Send raw connection update webhook
     if (shouldSendEventWebhook("connection.update")) {
       await sendWebhook(
         session.id,
@@ -194,13 +204,26 @@ export async function makeSocketForSession(session) {
     }
   });
 
+  // ===========================================
+  // MESSAGE EVENTS
+  // ===========================================
+
+  /**
+   * Event: messages.upsert
+   * New messages received (notify) or old messages synced (append)
+   * 
+   * Reference: https://baileys.wiki/docs/socket/receiving-updates/
+   */
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (!messages?.length) return;
 
     session.lastActivity = Date.now();
 
+    // Cache messages and contact names
     for (const m of messages) {
-      if (m?.key?.id) caches.messages.set(m.key.id, m);
+      if (m?.key?.id) {
+        caches.messages.set(m.key.id, m);
+      }
       if (m?.pushName && m?.key?.remoteJid) {
         const prev = caches.contacts.get(m.key.remoteJid) || {
           id: m.key.remoteJid,
@@ -209,6 +232,7 @@ export async function makeSocketForSession(session) {
       }
     }
 
+    // Send webhook with filtered messages
     if (shouldSendEventWebhook("messages.upsert")) {
       const filteredMessages = filterMessages(messages);
 
@@ -219,19 +243,85 @@ export async function makeSocketForSession(session) {
           serializeBaileysData({ type, messages: filteredMessages })
         );
       } else {
-        console.log(`[${session.id}] All messages filtered out, webhook not sent`);
+        console.log(`[${session.id}] Messages filtered out, no webhook sent`);
       }
     }
   });
 
+  /**
+   * Event: messages.update
+   * Message status updates (edited, deleted, receipt changes)
+   */
+  sock.ev.on("messages.update", async (updates) => {
+    if (!Array.isArray(updates)) updates = [updates];
+
+    const processedUpdates = updates.map(update => {
+      const { key, update: updateData } = update;
+
+      return {
+        key: {
+          remoteJid: key.remoteJid,
+          id: key.id,
+          participant: key.participant,
+          fromMe: key.fromMe
+        },
+        update: updateData,
+        timestamp: new Date().toISOString()
+      };
+    });
+
+    console.log(`[${session.id}] Messages updated: ${processedUpdates.length}`);
+
+    if (shouldSendEventWebhook("messages.update")) {
+      await sendWebhook(
+        session.id,
+        "messages.update",
+        processedUpdates
+      );
+    }
+  });
+
+  /**
+   * Event: messages.delete
+   * Messages were deleted
+   */
+  sock.ev.on("messages.delete", async (deletion) => {
+    console.log(`[${session.id}] Messages deleted`);
+
+    if (shouldSendEventWebhook("messages.delete")) {
+      await sendWebhook(
+        session.id,
+        "messages.delete",
+        serializeBaileysData(deletion)
+      );
+    }
+  });
+
+  /**
+   * Event: messages.reaction
+   * Reactions added or removed from messages
+   */
+  sock.ev.on("messages.reaction", async (reactions) => {
+    if (shouldSendEventWebhook("messages.reaction")) {
+      await sendWebhook(
+        session.id,
+        "messages.reaction",
+        serializeBaileysData(reactions)
+      );
+    }
+  });
+
+  /**
+   * Event: message-receipt.update
+   * Read/delivered/played receipts in groups and chats
+   */
   sock.ev.on("message-receipt.update", async (updates) => {
     if (!Array.isArray(updates)) updates = [updates];
 
     const processedUpdates = updates.map(update => {
       const { key, receipt } = update;
-      const timestamp = new Date().toISOString();
 
-      const processed = {
+      return {
         key: {
           remoteJid: key.remoteJid,
           id: key.id,
@@ -250,12 +340,8 @@ export async function makeSocketForSession(session) {
             : null,
           userJid: receipt?.userJid,
         },
-        timestamp
+        timestamp: new Date().toISOString()
       };
-
-      console.log(`[${session.id}] Receipt update for message ${key.id}:`, processed.receipt);
-
-      return processed;
     });
 
     if (shouldSendEventWebhook("message-receipt.update")) {
@@ -267,149 +353,28 @@ export async function makeSocketForSession(session) {
     }
   });
 
-  sock.ev.on("messages.update", async (updates) => {
-    if (!Array.isArray(updates)) updates = [updates];
+  // ===========================================
+  // CHAT EVENTS
+  // ===========================================
 
-    const processedUpdates = updates.map(update => {
-      const { key, update: updateData } = update;
-      const statusCode = updateData?.status;
-      const timestamp = new Date().toISOString();
-
-      const processed = {
-        key: {
-          remoteJid: key.remoteJid,
-          id: key.id,
-          participant: key.participant,
-          fromMe: key.fromMe
-        },
-        update: {
-          statusCode: statusCode,
-          timestamp
-        }
-      };
-
-      console.log(`[${session.id}] Status update for message ${key.id}: statusCode=${statusCode}`);
-
-      return processed;
-    });
-
-    if (shouldSendEventWebhook("messages.update")) {
-      await sendWebhook(
-        session.id,
-        "messages.update",
-        processedUpdates
-      );
-    }
-  });
-
-  sock.ev.on("messages.reaction", async (reactions) => {
-    if (shouldSendEventWebhook("messages.reaction")) {
-      await sendWebhook(
-        session.id,
-        "messages.reaction",
-        serializeBaileysData(reactions)
-      );
-    }
-  });
-
-  sock.ev.on("contacts.upsert", async (contacts) => {
-    contacts?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
-    if (shouldSendEventWebhook("contacts.upsert")) {
-      await sendWebhook(
-        session.id,
-        "contacts.upsert",
-        serializeBaileysData(contacts)
-      );
-    }
-  });
-
-  sock.ev.on("contacts.update", async (updates) => {
-    updates?.forEach(
-      (c) =>
-        c?.id &&
-        caches.contacts.set(c.id, {
-          ...(caches.contacts.get(c.id) || {}),
-          ...c,
-        })
-    );
-    if (shouldSendEventWebhook("contacts.update")) {
-      await sendWebhook(
-        session.id,
-        "contacts.update",
-        serializeBaileysData(updates)
-      );
-    }
-  });
-
-  sock.ev.on("messaging-history.set", async (history) => {
-    if (history?.contacts?.length) {
-      history.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
-    }
-
-    if (shouldSendEventWebhook("messaging-history.set")) {
-      await sendWebhook(
-        session.id,
-        "messaging-history.set",
-        serializeBaileysData(history)
-      );
-    }
-  });
-
-  sock.ev.on("groups.upsert", async (groups) => {
-    groups?.forEach((g) => g?.id && caches.groups.set(g.id, g));
-    if (shouldSendEventWebhook("groups.upsert")) {
-      await sendWebhook(
-        session.id,
-        "groups.upsert",
-        serializeBaileysData(groups)
-      );
-    }
-  });
-
-  sock.ev.on("groups.update", async (updates) => {
-    updates?.forEach(
-      (g) =>
-        g?.id &&
-        caches.groups.set(g.id, {
-          ...(caches.groups.get(g.id) || {}),
-          ...g,
-        })
-    );
-    if (shouldSendEventWebhook("groups.update")) {
-      await sendWebhook(
-        session.id,
-        "groups.update",
-        serializeBaileysData(updates)
-      );
-    }
-  });
-
-  sock.ev.on("group-participants.update", async (update) => {
-    if (shouldSendEventWebhook("group-participants.update")) {
-      await sendWebhook(
-        session.id,
-        "group-participants.update",
-        serializeBaileysData(update)
-      );
-    }
-  });
-
-  sock.ev.on("presence.update", async (update) => {
-    if (shouldSendEventWebhook("presence.update")) {
-      await sendWebhook(
-        session.id,
-        "presence.update",
-        serializeBaileysData(update)
-      );
-    }
-  });
-
+  /**
+   * Event: chats.upsert
+   * New chats opened
+   */
   sock.ev.on("chats.upsert", async (chats) => {
     if (shouldSendEventWebhook("chats.upsert")) {
-      await sendWebhook(session.id, "chats.upsert", serializeBaileysData(chats));
+      await sendWebhook(
+        session.id,
+        "chats.upsert",
+        serializeBaileysData(chats)
+      );
     }
   });
 
+  /**
+   * Event: chats.update
+   * Chat metadata updated (unread count, last message, etc.)
+   */
   sock.ev.on("chats.update", async (updates) => {
     if (shouldSendEventWebhook("chats.update")) {
       await sendWebhook(
@@ -420,6 +385,10 @@ export async function makeSocketForSession(session) {
     }
   });
 
+  /**
+   * Event: chats.delete
+   * Chats deleted
+   */
   sock.ev.on("chats.delete", async (deletions) => {
     if (shouldSendEventWebhook("chats.delete")) {
       await sendWebhook(
@@ -430,22 +399,186 @@ export async function makeSocketForSession(session) {
     }
   });
 
-  sock.ev.on("messages.delete", async (deletions) => {
-    if (shouldSendEventWebhook("messages.delete")) {
+  // ===========================================
+  // CONTACT EVENTS
+  // ===========================================
+
+  /**
+   * Event: contacts.upsert
+   * New contacts added
+   */
+  sock.ev.on("contacts.upsert", async (contacts) => {
+    contacts?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
+
+    if (shouldSendEventWebhook("contacts.upsert")) {
       await sendWebhook(
         session.id,
-        "messages.delete",
-        serializeBaileysData(deletions)
+        "contacts.upsert",
+        serializeBaileysData(contacts)
       );
     }
   });
 
-  sock.ev.on("call", async (calls) => {
-    if (shouldSendEventWebhook("call")) {
-      await sendWebhook(session.id, "call", serializeBaileysData(calls));
+  /**
+   * Event: contacts.update
+   * Contact details changed
+   */
+  sock.ev.on("contacts.update", async (updates) => {
+    updates?.forEach(
+      (c) =>
+        c?.id &&
+        caches.contacts.set(c.id, {
+          ...(caches.contacts.get(c.id) || {}),
+          ...c,
+        })
+    );
+
+    if (shouldSendEventWebhook("contacts.update")) {
+      await sendWebhook(
+        session.id,
+        "contacts.update",
+        serializeBaileysData(updates)
+      );
     }
   });
 
+  // ===========================================
+  // GROUP EVENTS
+  // ===========================================
+
+  /**
+   * Event: groups.upsert
+   * Joined new groups
+   */
+  sock.ev.on("groups.upsert", async (groups) => {
+    groups?.forEach((g) => g?.id && caches.groups.set(g.id, g));
+
+    if (shouldSendEventWebhook("groups.upsert")) {
+      await sendWebhook(
+        session.id,
+        "groups.upsert",
+        serializeBaileysData(groups)
+      );
+    }
+  });
+
+  /**
+   * Event: groups.update
+   * Group metadata changed
+   */
+  sock.ev.on("groups.update", async (updates) => {
+    updates?.forEach(
+      (g) =>
+        g?.id &&
+        caches.groups.set(g.id, {
+          ...(caches.groups.get(g.id) || {}),
+          ...g,
+        })
+    );
+
+    if (shouldSendEventWebhook("groups.update")) {
+      await sendWebhook(
+        session.id,
+        "groups.update",
+        serializeBaileysData(updates)
+      );
+    }
+  });
+
+  /**
+   * Event: group-participants.update
+   * Group participants added/removed or permissions changed
+   */
+  sock.ev.on("group-participants.update", async (update) => {
+    if (shouldSendEventWebhook("group-participants.update")) {
+      await sendWebhook(
+        session.id,
+        "group-participants.update",
+        serializeBaileysData(update)
+      );
+    }
+  });
+
+  // ===========================================
+  // HISTORY & PRESENCE EVENTS
+  // ===========================================
+
+  /**
+   * Event: messaging-history.set
+   * Historical messages synced (NOT messaging.history-set)
+   * This is the correct event name according to Baileys v7
+   */
+  sock.ev.on("messaging-history.set", async (history) => {
+    if (history?.contacts?.length) {
+      history.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
+    }
+
+    console.log(`[${session.id}] History synced:`, {
+      chats: history?.chats?.length || 0,
+      contacts: history?.contacts?.length || 0,
+      messages: history?.messages?.length || 0,
+      isLatest: history?.isLatest
+    });
+
+    if (shouldSendEventWebhook("messaging-history.set")) {
+      await sendWebhook(
+        session.id,
+        "messaging-history.set",
+        serializeBaileysData(history)
+      );
+    }
+  });
+
+  /**
+   * Event: presence.update
+   * Contact presence status changed (online, offline, typing, etc.)
+   */
+  sock.ev.on("presence.update", async (update) => {
+    if (shouldSendEventWebhook("presence.update")) {
+      await sendWebhook(
+        session.id,
+        "presence.update",
+        serializeBaileysData(update)
+      );
+    }
+  });
+
+  // ===========================================
+  // OTHER EVENTS
+  // ===========================================
+
+  /**
+   * Event: call
+   * Universal event for call data (accept/decline/offer/timeout)
+   */
+  sock.ev.on("call", async (calls) => {
+    if (shouldSendEventWebhook("call")) {
+      await sendWebhook(
+        session.id,
+        "call",
+        serializeBaileysData(calls)
+      );
+    }
+  });
+
+  /**
+   * Event: blocklist.set
+   * Initial blocklist received
+   */
+  sock.ev.on("blocklist.set", async (blocklist) => {
+    if (shouldSendEventWebhook("blocklist.set")) {
+      await sendWebhook(
+        session.id,
+        "blocklist.set",
+        serializeBaileysData(blocklist)
+      );
+    }
+  });
+
+  /**
+   * Event: blocklist.update
+   * Blocklist changed
+   */
   sock.ev.on("blocklist.update", async (update) => {
     if (shouldSendEventWebhook("blocklist.update")) {
       await sendWebhook(
@@ -456,6 +589,14 @@ export async function makeSocketForSession(session) {
     }
   });
 
+  // ===========================================
+  // HELPER METHODS
+  // ===========================================
+
+  /**
+   * Send message helper
+   * Handles all message types with proper formatting
+   */
   sock.__send = async (payload = {}) => {
     const {
       to,
@@ -482,18 +623,22 @@ export async function makeSocketForSession(session) {
     const jid = toJid(to);
     const sendOpts = { ...(options || {}) };
 
-    if (quoted) sendOpts.quoted = quoted;
-    else if (quotedId) {
+    // Handle quoted messages
+    if (quoted) {
+      sendOpts.quoted = quoted;
+    } else if (quotedId) {
       const q = session.caches.messages.get(quotedId);
       if (q) sendOpts.quoted = q;
     }
 
+    // Handle mentions
     const mentionedJid = Array.isArray(mentions)
       ? mentions.map((m) =>
         /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
       )
       : undefined;
 
+    // Handle media
     const media = base64
       ? Buffer.from(base64, "base64")
       : url
@@ -502,6 +647,7 @@ export async function makeSocketForSession(session) {
 
     let content;
 
+    // Build message content based on type
     switch (type) {
       case "text":
         content = { text };
@@ -591,10 +737,11 @@ export async function makeSocketForSession(session) {
         if (payload.content) {
           content = payload.content;
         } else {
-          throw new Error(`Unsupported type: ${type}`);
+          throw new Error(`Unsupported message type: ${type}`);
         }
     }
 
+    // Add mentions to context
     if (mentionedJid?.length) {
       content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
     }
@@ -604,16 +751,28 @@ export async function makeSocketForSession(session) {
     return await sock.sendMessage(jid, content, sendOpts);
   };
 
+  /**
+   * Download media helper
+   */
   sock.__download = async (wamessage) => {
     const buffer = await downloadMediaMessage(wamessage, "buffer");
     return buffer;
   };
 
+  /**
+   * Mark messages as read
+   */
   sock.__read = async (keys) => sock.readMessages(keys);
 
+  /**
+   * Send message receipt (delivered, read, etc.)
+   */
   sock.__receipt = async (jid, participant, ids, type) =>
     sock.sendReceipt(jid, participant, ids, type);
 
+  /**
+   * Get contact info with profile picture
+   */
   sock.__contactInfo = async (id, cachesRef = caches) => {
     const jid = toJid(id);
     let profilePictureUrl;
@@ -628,6 +787,9 @@ export async function makeSocketForSession(session) {
     };
   };
 
+  /**
+   * Send presence update (typing, recording, etc.)
+   */
   sock.__typing = async (to, state = "composing") => {
     const jid = toJid(to);
     await sock.sendPresenceUpdate(state, jid);
