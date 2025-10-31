@@ -15,6 +15,7 @@ import {
 import { toJid } from "../utils/jid.js";
 import { restartSession } from "./manager.js";
 import { SHOW_QR_IN_TERMINAL } from "../config.js";
+import { captureException, addBreadcrumb, setContext } from "../services/sentry.js";
 
 function serializeBaileysData(data) {
   return JSON.parse(
@@ -44,6 +45,17 @@ function serializeBaileysData(data) {
 
 export async function makeSocketForSession(session) {
   const { state, saveCreds, caches, browser } = session;
+
+  setContext("session", {
+    id: session.id,
+    status: session.status,
+  });
+
+  addBreadcrumb({
+    category: "session",
+    message: `Creating socket for session ${session.id}`,
+    level: "info",
+  });
 
   const { version } = await fetchLatestBaileysVersion();
   console.log(`[${session.id}] Using WA version ${version.join(".")}`);
@@ -76,6 +88,10 @@ export async function makeSocketForSession(session) {
           session.lastActivity = Date.now();
         } catch (e) {
           console.warn(`[${session.id}] Keep-alive ping failed:`, e.message);
+          captureException(e, {
+            sessionId: session.id,
+            context: "keep_alive"
+          });
         }
       }
     }, 30000);
@@ -94,6 +110,17 @@ export async function makeSocketForSession(session) {
 
   sock.ev.on("connection.update", async (update) => {
     const { connection, lastDisconnect, qr, isNewLogin } = update;
+
+    addBreadcrumb({
+      category: "connection",
+      message: `Connection update for ${session.id}`,
+      level: "info",
+      data: {
+        connection,
+        hasQR: !!qr,
+        isNewLogin,
+      },
+    });
 
     console.log(`[${session.id}] connection.update:`, {
       connection,
@@ -151,6 +178,13 @@ export async function makeSocketForSession(session) {
 
       console.log(`[${session.id}] ✅ Connected:`, accountInfo);
 
+      addBreadcrumb({
+        category: "session",
+        message: `Session ${session.id} connected`,
+        level: "info",
+        data: accountInfo,
+      });
+
       if (shouldSendEventWebhook("session.connected")) {
         await sendWebhook(session.id, "session.connected", accountInfo);
       }
@@ -175,6 +209,21 @@ export async function makeSocketForSession(session) {
       };
 
       console.log(`[${session.id}] ❌ Disconnected:`, disconnectInfo);
+
+      addBreadcrumb({
+        category: "session",
+        message: `Session ${session.id} disconnected`,
+        level: "warning",
+        data: disconnectInfo,
+      });
+
+      if (code === DisconnectReason.loggedOut) {
+        captureException(new Error("Session logged out"), {
+          sessionId: session.id,
+          reason,
+          code,
+        });
+      }
 
       if (shouldSendEventWebhook("session.disconnected")) {
         await sendWebhook(session.id, "session.disconnected", disconnectInfo);
@@ -207,10 +256,19 @@ export async function makeSocketForSession(session) {
               await restartSession(session.id);
             } catch (e) {
               console.error(`[${session.id}] Falha ao reconectar:`, e.message);
+              captureException(e, {
+                sessionId: session.id,
+                context: "reconnect",
+                attempt: session.reconnectAttempts,
+              });
             }
           }, delay);
         } else {
           console.error(`[${session.id}] Máximo de tentativas atingido`);
+          captureException(new Error("Max reconnection attempts reached"), {
+            sessionId: session.id,
+            attempts: session.reconnectAttempts,
+          });
         }
         return;
       }
@@ -514,157 +572,181 @@ export async function makeSocketForSession(session) {
   });
 
   sock.__send = async (payload = {}) => {
-    const {
-      to,
-      type,
-      text,
-      caption,
-      url,
-      base64,
-      mimetype,
-      fileName,
-      ptt,
-      gifPlayback,
-      viewOnce,
-      quality,
-      quoted,
-      quotedId,
-      mentions,
-      poll,
-      contacts,
-      location,
-      options = {},
-    } = payload;
+    try {
+      const {
+        to,
+        type,
+        text,
+        caption,
+        url,
+        base64,
+        mimetype,
+        fileName,
+        ptt,
+        gifPlayback,
+        viewOnce,
+        quality,
+        quoted,
+        quotedId,
+        mentions,
+        poll,
+        contacts,
+        location,
+        options = {},
+      } = payload;
 
-    const jid = toJid(to);
-    const sendOpts = { ...(options || {}) };
+      const jid = toJid(to);
+      const sendOpts = { ...(options || {}) };
 
-    if (quoted) {
-      sendOpts.quoted = quoted;
-    } else if (quotedId) {
-      const q = session.caches.messages.get(quotedId);
-      if (q) sendOpts.quoted = q;
-    }
+      if (quoted) {
+        sendOpts.quoted = quoted;
+      } else if (quotedId) {
+        const q = session.caches.messages.get(quotedId);
+        if (q) sendOpts.quoted = q;
+      }
 
-    const mentionedJid = Array.isArray(mentions)
-      ? mentions.map((m) =>
-        /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
-      )
-      : undefined;
-
-    const media = base64
-      ? Buffer.from(base64, "base64")
-      : url
-        ? { url }
+      const mentionedJid = Array.isArray(mentions)
+        ? mentions.map((m) =>
+          /@/.test(m) ? m : `${String(m).replace(/\D/g, "")}@s.whatsapp.net`
+        )
         : undefined;
 
-    let content;
+      const media = base64
+        ? Buffer.from(base64, "base64")
+        : url
+          ? { url }
+          : undefined;
 
-    switch (type) {
-      case "text":
-        content = { text };
-        break;
+      let content;
 
-      case "image": {
-        const sendAsDocument = quality === "hd" || quality === "original";
-        content = sendAsDocument
-          ? {
-            document: media,
-            mimetype: mimetype || "image/jpeg",
-            fileName: fileName || "image.jpg",
-          }
-          : { image: media, caption, mimetype };
-        if (viewOnce) content.viewOnce = true;
-        break;
-      }
+      switch (type) {
+        case "text":
+          content = { text };
+          break;
 
-      case "video": {
-        const sendAsDocument = quality === "hd" || quality === "original";
-        content = sendAsDocument
-          ? {
-            document: media,
-            mimetype: mimetype || "video/mp4",
-            fileName: fileName || "video.mp4",
-          }
-          : { video: media, caption, mimetype, gifPlayback: !!gifPlayback };
-        if (viewOnce) content.viewOnce = true;
-        break;
-      }
-
-      case "audio":
-        content = {
-          audio: media,
-          ptt: !!ptt,
-          mimetype: mimetype || (ptt ? "audio/ogg; codecs=opus" : undefined),
-        };
-        break;
-
-      case "document":
-        content = { document: media, mimetype, fileName };
-        break;
-
-      case "sticker":
-        content = { sticker: media, mimetype: mimetype || "image/webp" };
-        break;
-
-      case "contacts": {
-        let displayName = contacts?.displayName || "Contact";
-        let arr = [];
-        if (Array.isArray(contacts?.vcards)) {
-          arr = contacts.vcards.map((v) => ({ vcard: v }));
-        } else if (Array.isArray(contacts?.contacts)) {
-          arr = contacts.contacts.map((c) => ({ vcard: c.vcard }));
+        case "image": {
+          const sendAsDocument = quality === "hd" || quality === "original";
+          content = sendAsDocument
+            ? {
+              document: media,
+              mimetype: mimetype || "image/jpeg",
+              fileName: fileName || "image.jpg",
+            }
+            : { image: media, caption, mimetype };
+          if (viewOnce) content.viewOnce = true;
+          break;
         }
-        content = { contacts: { displayName, contacts: arr } };
-        break;
-      }
 
-      case "poll": {
-        let messageSecret = poll?.messageSecretB64
-          ? Buffer.from(poll.messageSecretB64, "base64")
-          : randomBytes(32);
-        content = {
-          poll: {
-            name: poll?.name,
-            values: poll?.values || [],
-            selectableCount: poll?.selectableCount,
-            messageSecret,
-          },
-        };
-        break;
-      }
-
-      case "location":
-        content = {
-          location: {
-            degreesLatitude: Number(location?.latitude),
-            degreesLongitude: Number(location?.longitude),
-            name: location?.name,
-            address: location?.address,
-          },
-        };
-        break;
-
-      default:
-        if (payload.content) {
-          content = payload.content;
-        } else {
-          throw new Error(`Unsupported message type: ${type}`);
+        case "video": {
+          const sendAsDocument = quality === "hd" || quality === "original";
+          content = sendAsDocument
+            ? {
+              document: media,
+              mimetype: mimetype || "video/mp4",
+              fileName: fileName || "video.mp4",
+            }
+            : { video: media, caption, mimetype, gifPlayback: !!gifPlayback };
+          if (viewOnce) content.viewOnce = true;
+          break;
         }
+
+        case "audio":
+          content = {
+            audio: media,
+            ptt: !!ptt,
+            mimetype: mimetype || (ptt ? "audio/ogg; codecs=opus" : undefined),
+          };
+          break;
+
+        case "document":
+          content = { document: media, mimetype, fileName };
+          break;
+
+        case "sticker":
+          content = { sticker: media, mimetype: mimetype || "image/webp" };
+          break;
+
+        case "contacts": {
+          let displayName = contacts?.displayName || "Contact";
+          let arr = [];
+          if (Array.isArray(contacts?.vcards)) {
+            arr = contacts.vcards.map((v) => ({ vcard: v }));
+          } else if (Array.isArray(contacts?.contacts)) {
+            arr = contacts.contacts.map((c) => ({ vcard: c.vcard }));
+          }
+          content = { contacts: { displayName, contacts: arr } };
+          break;
+        }
+
+        case "poll": {
+          let messageSecret = poll?.messageSecretB64
+            ? Buffer.from(poll.messageSecretB64, "base64")
+            : randomBytes(32);
+          content = {
+            poll: {
+              name: poll?.name,
+              values: poll?.values || [],
+              selectableCount: poll?.selectableCount,
+              messageSecret,
+            },
+          };
+          break;
+        }
+
+        case "location":
+          content = {
+            location: {
+              degreesLatitude: Number(location?.latitude),
+              degreesLongitude: Number(location?.longitude),
+              name: location?.name,
+              address: location?.address,
+            },
+          };
+          break;
+
+        default:
+          if (payload.content) {
+            content = payload.content;
+          } else {
+            throw new Error(`Unsupported message type: ${type}`);
+          }
+      }
+
+      if (mentionedJid?.length) {
+        content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
+      }
+
+      session.lastActivity = Date.now();
+
+      addBreadcrumb({
+        category: "message",
+        message: `Sending ${type} message`,
+        level: "info",
+        data: { to: jid, type },
+      });
+
+      return await sock.sendMessage(jid, content, sendOpts);
+    } catch (error) {
+      captureException(error, {
+        sessionId: session.id,
+        context: "send_message",
+        messageType: payload.type,
+      });
+      throw error;
     }
-
-    if (mentionedJid?.length) {
-      content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
-    }
-
-    session.lastActivity = Date.now();
-
-    return await sock.sendMessage(jid, content, sendOpts);
   };
 
   sock.__download = async (wamessage) => {
-    const buffer = await downloadMediaMessage(wamessage, "buffer");
-    return buffer;
+    try {
+      const buffer = await downloadMediaMessage(wamessage, "buffer");
+      return buffer;
+    } catch (error) {
+      captureException(error, {
+        sessionId: session.id,
+        context: "download_media",
+      });
+      throw error;
+    }
   };
 
   sock.__read = async (keys) => sock.readMessages(keys);

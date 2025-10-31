@@ -23,6 +23,10 @@ export const WEBHOOK_SKIP_BLOCKED = process.env.WEBHOOK_SKIP_BLOCKED === "false"
 export const WEBHOOK_ALLOWED_EVENTS = process.env.WEBHOOK_ALLOWED_EVENTS || "";
 export const WEBHOOK_DENIED_EVENTS = process.env.WEBHOOK_DENIED_EVENTS || "";
 
+// Sentry Configuration
+export const SENTRY_DSN = process.env.SENTRY_DSN || "";
+export const SENTRY_TRACES_SAMPLE_RATE = parseFloat(process.env.SENTRY_TRACES_SAMPLE_RATE || "0.1");
+
 /**
  * Get Redis connection options
  */
@@ -89,4 +93,10 @@ console.log("[config] Webhook Filters:", {
   skipBlocked: WEBHOOK_SKIP_BLOCKED,
   allowedEvents: WEBHOOK_ALLOWED_EVENTS || "all",
   deniedEvents: WEBHOOK_DENIED_EVENTS || "none",
+});
+
+console.log("[config] Sentry:", {
+  dsnConfigured: !!SENTRY_DSN,
+  tracesSampleRate: SENTRY_TRACES_SAMPLE_RATE,
+  environment: process.env.NODE_ENV || "production",
 });

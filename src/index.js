@@ -1,3 +1,6 @@
+import { initSentry } from "./services/sentry.js";
+initSentry();
+
 import express from "express";
 import compression from "compression";
 import { PORT } from "./config.js";
@@ -14,6 +17,9 @@ import {
   errorHandler,
   generalLimiter,
 } from "./middleware/validation.js";
+import { sentryRequestHandler, sentryErrorHandler } from "./middleware/sentry.js";
+import { captureException, captureMessage } from "./services/sentry.js";
+
 class PerformanceMonitor {
   constructor() {
     this.metrics = {
@@ -80,12 +86,13 @@ class PerformanceMonitor {
 const app = express();
 const monitor = new PerformanceMonitor();
 
-app.use(compression()); // Enable gzip compression
+app.use(compression());
 app.use(express.json({ limit: "15mb" }));
-app.use(requestLogger); // Log all requests
-app.use(monitor.middleware()); // Performance monitoring
-app.use(authenticateApiKey); // API key authentication
-app.use(generalLimiter.getMiddleware()); // General rate limiting
+app.use(sentryRequestHandler());
+app.use(requestLogger);
+app.use(monitor.middleware());
+app.use(authenticateApiKey);
+app.use(generalLimiter.getMiddleware());
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
@@ -119,6 +126,7 @@ app.get("/healthz", async (_req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
+    captureException(error, { context: "healthz" });
     res.status(503).json({
       ok: false,
       error: "Service unhealthy",
@@ -153,6 +161,7 @@ app.get("/healthz/detailed", async (_req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
+    captureException(error, { context: "healthz_detailed" });
     res.status(503).json({
       ok: false,
       error: "Service unhealthy",
@@ -185,7 +194,6 @@ app.get("/admin/webhook-filters", (req, res) => {
   });
 });
 
-
 app.get("/admin/webhook-stats", async (req, res) => {
   const stats = await webhookQueue.getStats();
   res.json(stats);
@@ -210,10 +218,12 @@ app.use((req, res) => {
   });
 });
 
+app.use(sentryErrorHandler());
 app.use(errorHandler);
 
 const gracefulShutdown = async (signal) => {
   console.log(`\n[${signal}] Shutting down gracefully...`);
+  captureMessage(`Service shutting down: ${signal}`, "warning");
 
   server.close(() => {
     console.log("HTTP server closed");
@@ -223,6 +233,7 @@ const gracefulShutdown = async (signal) => {
 
   const shutdownTimeout = setTimeout(() => {
     console.log("Forcing shutdown...");
+    captureMessage("Forced shutdown after timeout", "error");
     process.exit(1);
   }, 10000);
 
@@ -234,6 +245,7 @@ const gracefulShutdown = async (signal) => {
     process.exit(0);
   } catch (error) {
     console.error("Error during shutdown:", error);
+    captureException(error, { context: "graceful_shutdown" });
     process.exit(1);
   }
 };
@@ -243,11 +255,13 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 process.on("uncaughtException", (error) => {
   console.error("[FATAL] Uncaught Exception:", error);
+  captureException(error, { context: "uncaught_exception", fatal: true });
   gracefulShutdown("uncaughtException");
 });
 
 process.on("unhandledRejection", (reason, promise) => {
   console.error("[ERROR] Unhandled Rejection at:", promise, "reason:", reason);
+  captureException(reason, { context: "unhandled_rejection", promise: String(promise) });
 });
 
 const server = app.listen(PORT, async () => {
@@ -264,16 +278,21 @@ const server = app.listen(PORT, async () => {
     ║  Webhooks: ${(process.env.WEBHOOK_URL ? "Enabled" : "Disabled").padEnd(
     28
   )}║
+    ║  Sentry: ${(process.env.SENTRY_DSN ? "Enabled" : "Disabled").padEnd(
+    29
+  )}║
     ╚════════════════════════════════════════╝
   `);
 
   try {
     console.log("[Bootstrap] Restoring sessions from Redis...");
     await restoreAllSessions();
+    captureMessage("Service started successfully", "info");
   } catch (error) {
     console.error(
       "[Bootstrap] Failed to restore sessions:",
       error?.message || error
     );
+    captureException(error, { context: "bootstrap" });
   }
 });
