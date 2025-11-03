@@ -287,7 +287,6 @@ const server = app.listen(PORT, async () => {
   try {
     console.log("[Bootstrap] Restoring sessions from Redis...");
     await restoreAllSessions();
-    captureMessage("Service started successfully", "info");
   } catch (error) {
     console.error(
       "[Bootstrap] Failed to restore sessions:",
