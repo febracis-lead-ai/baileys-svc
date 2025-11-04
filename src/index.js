@@ -19,6 +19,7 @@ import {
 } from "./middleware/validation.js";
 import { sentryRequestHandler, sentryErrorHandler } from "./middleware/sentry.js";
 import { captureException, captureMessage } from "./services/sentry.js";
+import { listSessions, getActualSessionStatus } from "./sessions/manager.js";
 
 class PerformanceMonitor {
   constructor() {
@@ -181,50 +182,56 @@ app.get("/admin/metrics", (req, res) => {
 
 app.get("/admin/sessions/health", async (req, res) => {
   try {
-    const sessions = listSessions();
+    const sessionsData = listSessions();
     const healthData = [];
 
-    for (const session of sessions) {
-      const fullSession = getSession(session.id);
-      const statusCheck = getActualSessionStatus(fullSession);
+    for (const sessionInfo of sessionsData) {
+      try {
+        const fullSession = sessions.get(sessionInfo.id);
+        if (!fullSession) continue;
 
-      const timeSinceActivity = fullSession.lastActivity
-        ? Date.now() - fullSession.lastActivity
-        : null;
+        const statusCheck = getActualSessionStatus(fullSession);
 
-      const timeSinceConnected = fullSession.connectedAt
-        ? Date.now() - fullSession.connectedAt
-        : null;
+        const timeSinceActivity = fullSession.lastActivity
+          ? Date.now() - fullSession.lastActivity
+          : null;
 
-      healthData.push({
-        id: session.id,
-        status: statusCheck.actualStatus,
-        isAuthenticated: statusCheck.isAuthenticated,
-        websocket: {
-          state: statusCheck.wsState,
-          stateText: getWebSocketStateText(statusCheck.wsState),
-          isConnected: statusCheck.isWsConnected,
-        },
-        activity: {
-          lastActivity: fullSession.lastActivity,
-          timeSinceActivity: timeSinceActivity
-            ? `${Math.round(timeSinceActivity / 1000)}s`
-            : null,
-          isIdle: timeSinceActivity > 300000, // 5 min
-        },
-        connection: {
-          connectedAt: fullSession.connectedAt,
-          uptime: timeSinceConnected
-            ? `${Math.round(timeSinceConnected / 1000)}s`
-            : null,
-          reconnectAttempts: fullSession.reconnectAttempts || 0,
-        },
-        credentials: {
-          valid: statusCheck.credentialsValid,
-          phone: fullSession.state?.creds?.me?.id || null,
-          name: fullSession.state?.creds?.me?.name || null,
-        },
-      });
+        const timeSinceConnected = fullSession.connectedAt
+          ? Date.now() - fullSession.connectedAt
+          : null;
+
+        healthData.push({
+          id: sessionInfo.id,
+          status: statusCheck.actualStatus,
+          isAuthenticated: statusCheck.isAuthenticated,
+          websocket: {
+            state: statusCheck.wsState,
+            stateText: getWebSocketStateText(statusCheck.wsState),
+            isConnected: statusCheck.isWsConnected,
+          },
+          activity: {
+            lastActivity: fullSession.lastActivity,
+            timeSinceActivity: timeSinceActivity
+              ? `${Math.round(timeSinceActivity / 1000)}s`
+              : null,
+            isIdle: timeSinceActivity && timeSinceActivity > 300000, // 5 min
+          },
+          connection: {
+            connectedAt: fullSession.connectedAt,
+            uptime: timeSinceConnected
+              ? `${Math.round(timeSinceConnected / 1000)}s`
+              : null,
+            reconnectAttempts: fullSession.reconnectAttempts || 0,
+          },
+          credentials: {
+            valid: statusCheck.credentialsValid,
+            phone: fullSession.state?.creds?.me?.id || null,
+            name: fullSession.state?.creds?.me?.name || null,
+          },
+        });
+      } catch (err) {
+        console.error(`[admin/health] Error processing session ${sessionInfo.id}:`, err.message);
+      }
     }
 
     res.json({
@@ -237,6 +244,7 @@ app.get("/admin/sessions/health", async (req, res) => {
       sessions: healthData,
     });
   } catch (error) {
+    captureException(error, { context: "admin_sessions_health" });
     res.status(500).json({
       ok: false,
       error: error.message,
@@ -244,18 +252,29 @@ app.get("/admin/sessions/health", async (req, res) => {
   }
 });
 
+// Admin endpoint: Forçar health check em uma sessão específica
 app.post("/admin/sessions/:id/force-health-check", async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = sessions.get(req.params.id);
 
-    if (session.status !== "open") {
-      return res.status(400).json({
+    if (!session) {
+      return res.status(404).json({
         ok: false,
-        error: "Session is not open",
-        status: session.status,
+        error: "Session not found",
       });
     }
 
+    const statusCheck = getActualSessionStatus(session);
+
+    if (statusCheck.actualStatus !== "open") {
+      return res.status(400).json({
+        ok: false,
+        error: "Session is not open",
+        status: statusCheck.actualStatus,
+      });
+    }
+
+    // Tenta enviar presença para verificar se conexão funciona
     try {
       await session.sock.sendPresenceUpdate('available');
       session.lastActivity = Date.now();
@@ -266,6 +285,11 @@ app.post("/admin/sessions/:id/force-health-check", async (req, res) => {
         lastActivity: session.lastActivity,
       });
     } catch (err) {
+      captureException(err, {
+        context: "force_health_check",
+        sessionId: session.id
+      });
+
       res.status(503).json({
         ok: false,
         error: "Health check failed - connection is not responding",
@@ -274,6 +298,7 @@ app.post("/admin/sessions/:id/force-health-check", async (req, res) => {
       });
     }
   } catch (error) {
+    captureException(error, { context: "force_health_check" });
     res.status(500).json({
       ok: false,
       error: error.message,
@@ -281,6 +306,7 @@ app.post("/admin/sessions/:id/force-health-check", async (req, res) => {
   }
 });
 
+// Admin endpoint: Verificar configurações de keep-alive
 app.get("/admin/config/keep-alive", (req, res) => {
   res.json({
     ok: true,
@@ -302,12 +328,30 @@ app.get("/admin/config/keep-alive", (req, res) => {
       autoReconnect: "Automatically reconnect on connection issues",
       maxReconnectAttempts: "Maximum reconnection attempts",
     },
+    activeValues: {
+      pingInterval: parseInt(process.env.KEEP_ALIVE_PING_INTERVAL || "30000"),
+      pongTimeout: parseInt(process.env.KEEP_ALIVE_PONG_TIMEOUT || "10000"),
+      maxMissedPongs: parseInt(process.env.KEEP_ALIVE_MAX_MISSED_PONGS || "3"),
+      healthCheckInterval: parseInt(process.env.HEALTH_CHECK_INTERVAL || "60000"),
+      maxIdleTime: parseInt(process.env.MAX_IDLE_TIME || "300000"),
+      autoReconnect: process.env.AUTO_RECONNECT !== "false",
+      maxReconnectAttempts: parseInt(process.env.MAX_RECONNECT_ATTEMPTS || "10"),
+    }
   });
 });
 
-app.get("/admin/sessions/:id/reconnect-stats", (req, res) => {
+// Admin endpoint: Obter estatísticas de reconexão
+app.get("/admin/sessions/:id/reconnect-stats", async (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = sessions.get(req.params.id);
+
+    if (!session) {
+      return res.status(404).json({
+        ok: false,
+        error: "Session not found",
+      });
+    }
+
     const statusCheck = getActualSessionStatus(session);
 
     res.json({
@@ -318,6 +362,7 @@ app.get("/admin/sessions/:id/reconnect-stats", (req, res) => {
         attempts: session.reconnectAttempts || 0,
         maxAttempts: parseInt(process.env.MAX_RECONNECT_ATTEMPTS || "10"),
         autoReconnect: process.env.AUTO_RECONNECT !== "false",
+        willRetry: (session.reconnectAttempts || 0) < parseInt(process.env.MAX_RECONNECT_ATTEMPTS || "10"),
       },
       connection: {
         connectedAt: session.connectedAt,
@@ -325,9 +370,17 @@ app.get("/admin/sessions/:id/reconnect-stats", (req, res) => {
         timeSinceActivity: session.lastActivity
           ? `${Math.round((Date.now() - session.lastActivity) / 1000)}s`
           : null,
+        uptime: session.connectedAt
+          ? `${Math.round((Date.now() - session.connectedAt) / 1000)}s`
+          : null,
       },
+      credentials: {
+        valid: statusCheck.credentialsValid,
+        phone: session.state?.creds?.me?.id || null,
+      }
     });
   } catch (error) {
+    captureException(error, { context: "reconnect_stats" });
     res.status(500).json({
       ok: false,
       error: error.message,
