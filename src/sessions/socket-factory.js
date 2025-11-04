@@ -78,23 +78,135 @@ export async function makeSocketForSession(session) {
     },
   });
 
+  // ============================================
+  // KEEP-ALIVE
+  // ============================================
+  const {
+    KEEP_ALIVE_PING_INTERVAL,
+    KEEP_ALIVE_PONG_TIMEOUT,
+    KEEP_ALIVE_MAX_MISSED_PONGS,
+    HEALTH_CHECK_INTERVAL: HEALTH_INTERVAL,
+    MAX_IDLE_TIME,
+  } = await import("../config.js");
+
   let keepAliveInterval;
+  let healthCheckInterval;
+  let lastPongReceived = Date.now();
+  let missedPongs = 0;
+  const MAX_MISSED_PONGS = KEEP_ALIVE_MAX_MISSED_PONGS;
+  const PING_INTERVAL = KEEP_ALIVE_PING_INTERVAL;
+  const HEALTH_CHECK_INTERVAL = HEALTH_INTERVAL;
+  const PONG_TIMEOUT = KEEP_ALIVE_PONG_TIMEOUT;
+
   const startKeepAlive = () => {
     if (keepAliveInterval) clearInterval(keepAliveInterval);
+    if (healthCheckInterval) clearInterval(healthCheckInterval);
+
+    lastPongReceived = Date.now();
+    missedPongs = 0;
+
     keepAliveInterval = setInterval(() => {
-      if (session.status === "open" && sock?.ws?.readyState === 1) {
-        try {
-          sock.ws.ping();
-          session.lastActivity = Date.now();
-        } catch (e) {
-          console.warn(`[${session.id}] Keep-alive ping failed:`, e.message);
-          captureException(e, {
-            sessionId: session.id,
-            context: "keep_alive"
-          });
-        }
+      if (session.status !== "open" || sock?.ws?.readyState !== 1) {
+        return;
       }
-    }, 30000);
+
+      try {
+        const timeSinceLastPong = Date.now() - lastPongReceived;
+
+        if (timeSinceLastPong > PONG_TIMEOUT) {
+          missedPongs++;
+          console.warn(
+            `[${session.id}] Pong timeout (${missedPongs}/${MAX_MISSED_PONGS})`
+          );
+
+          if (missedPongs >= MAX_MISSED_PONGS) {
+            console.error(
+              `[${session.id}] Conexão morta detectada (${MAX_MISSED_PONGS} pongs perdidos). Forçando reconexão...`
+            );
+
+            captureException(new Error("Dead connection detected"), {
+              sessionId: session.id,
+              missedPongs,
+              timeSinceLastPong,
+            });
+
+            if (sock.ws) {
+              sock.ws.close(1000, "dead connection");
+            }
+            return;
+          }
+        }
+
+        sock.ws.ping();
+
+        const pongHandler = () => {
+          lastPongReceived = Date.now();
+          missedPongs = 0;
+          session.lastActivity = Date.now();
+          sock.ws?.off('pong', pongHandler);
+        };
+
+        sock.ws.once('pong', pongHandler);
+
+      } catch (e) {
+        console.warn(`[${session.id}] Keep-alive ping failed:`, e.message);
+        captureException(e, {
+          sessionId: session.id,
+          context: "keep_alive"
+        });
+      }
+    }, PING_INTERVAL);
+
+    healthCheckInterval = setInterval(async () => {
+      if (session.status !== "open") return;
+
+      try {
+        const wsState = sock?.ws?.readyState;
+        const timeSinceActivity = Date.now() - (session.lastActivity || 0);
+
+        if (timeSinceActivity > 300000) {
+          console.warn(
+            `[${session.id}] Conexão estagnada detectada (${Math.round(timeSinceActivity / 1000)}s sem atividade)`
+          );
+
+          try {
+            await sock.sendPresenceUpdate('available');
+            session.lastActivity = Date.now();
+            console.log(`[${session.id}] Health check OK - conexão respondeu`);
+          } catch (err) {
+            console.error(
+              `[${session.id}] Health check FAILED - conexão não responde. Reconectando...`
+            );
+
+            captureException(new Error("Health check failed"), {
+              sessionId: session.id,
+              timeSinceActivity,
+              error: err.message,
+            });
+
+            if (sock.ws) {
+              sock.ws.close(1000, "health check failed");
+            }
+          }
+        }
+
+        if (wsState !== 1 && session.status === "open") {
+          console.error(
+            `[${session.id}] Inconsistência detectada: status='open' mas WebSocket não está OPEN (state=${wsState})`
+          );
+          session.status = "close";
+        }
+
+      } catch (e) {
+        console.error(`[${session.id}] Health check error:`, e.message);
+        captureException(e, {
+          sessionId: session.id,
+          context: "health_check"
+        });
+      }
+    }, HEALTH_CHECK_INTERVAL);
+
+    console.log(`[${session.id}] Keep-alive e health check iniciados`);
   };
 
   const stopKeepAlive = () => {
@@ -102,9 +214,18 @@ export async function makeSocketForSession(session) {
       clearInterval(keepAliveInterval);
       keepAliveInterval = null;
     }
+    if (healthCheckInterval) {
+      clearInterval(healthCheckInterval);
+      healthCheckInterval = null;
+    }
+    console.log(`[${session.id}] Keep-alive e health check parados`);
   };
 
   session._cleanup = stopKeepAlive;
+
+  // ============================================
+  // EVENT HANDLERS
+  // ============================================
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -287,10 +408,14 @@ export async function makeSocketForSession(session) {
     }
   });
 
+  const updateActivity = () => {
+    session.lastActivity = Date.now();
+  };
+
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (!messages?.length) return;
 
-    session.lastActivity = Date.now();
+    updateActivity();
 
     for (const m of messages) {
       if (m?.key?.id) {
@@ -320,6 +445,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("messages.update", async (updates) => {
+    updateActivity();
+
     if (!Array.isArray(updates)) updates = [updates];
 
     const processedUpdates = updates.map(update => {
@@ -349,6 +476,7 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("messages.delete", async (deletion) => {
+    updateActivity();
     console.log(`[${session.id}] Messages deleted`);
 
     if (shouldSendEventWebhook("messages.delete")) {
@@ -361,6 +489,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("messages.reaction", async (reactions) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("messages.reaction")) {
       await sendWebhook(
         session.id,
@@ -371,6 +501,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("message-receipt.update", async (updates) => {
+    updateActivity();
+
     if (!Array.isArray(updates)) updates = [updates];
 
     const processedUpdates = updates.map(update => {
@@ -409,6 +541,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("chats.upsert", async (chats) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("chats.upsert")) {
       await sendWebhook(
         session.id,
@@ -419,6 +553,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("chats.update", async (updates) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("chats.update")) {
       await sendWebhook(
         session.id,
@@ -429,6 +565,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("chats.delete", async (deletions) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("chats.delete")) {
       await sendWebhook(
         session.id,
@@ -439,6 +577,7 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("contacts.upsert", async (contacts) => {
+    updateActivity();
     contacts?.forEach((c) => c?.id && caches.contacts.set(c.id, c));
 
     if (shouldSendEventWebhook("contacts.upsert")) {
@@ -451,6 +590,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("contacts.update", async (updates) => {
+    updateActivity();
+
     updates?.forEach(
       (c) =>
         c?.id &&
@@ -470,6 +611,7 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("groups.upsert", async (groups) => {
+    updateActivity();
     groups?.forEach((g) => g?.id && caches.groups.set(g.id, g));
 
     if (shouldSendEventWebhook("groups.upsert")) {
@@ -482,6 +624,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("groups.update", async (updates) => {
+    updateActivity();
+
     updates?.forEach(
       (g) =>
         g?.id &&
@@ -501,6 +645,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("group-participants.update", async (update) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("group-participants.update")) {
       await sendWebhook(
         session.id,
@@ -511,6 +657,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("messaging-history.set", async (history) => {
+    updateActivity();
+
     if (history?.contacts?.length) {
       history.contacts.forEach((c) => c?.id && caches.contacts.set(c.id, c));
     }
@@ -532,6 +680,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("presence.update", async (update) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("presence.update")) {
       await sendWebhook(
         session.id,
@@ -542,6 +692,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("call", async (calls) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("call")) {
       await sendWebhook(
         session.id,
@@ -552,6 +704,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("blocklist.set", async (blocklist) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("blocklist.set")) {
       await sendWebhook(
         session.id,
@@ -562,6 +716,8 @@ export async function makeSocketForSession(session) {
   });
 
   sock.ev.on("blocklist.update", async (update) => {
+    updateActivity();
+
     if (shouldSendEventWebhook("blocklist.update")) {
       await sendWebhook(
         session.id,
@@ -570,6 +726,10 @@ export async function makeSocketForSession(session) {
       );
     }
   });
+
+  // ============================================
+  // CUSTOM METHODS
+  // ============================================
 
   sock.__send = async (payload = {}) => {
     try {
@@ -716,7 +876,7 @@ export async function makeSocketForSession(session) {
         content.contextInfo = { ...(content.contextInfo || {}), mentionedJid };
       }
 
-      session.lastActivity = Date.now();
+      updateActivity();
 
       addBreadcrumb({
         category: "message",
@@ -738,6 +898,7 @@ export async function makeSocketForSession(session) {
 
   sock.__download = async (wamessage) => {
     try {
+      updateActivity();
       const buffer = await downloadMediaMessage(wamessage, "buffer");
       return buffer;
     } catch (error) {
@@ -749,12 +910,19 @@ export async function makeSocketForSession(session) {
     }
   };
 
-  sock.__read = async (keys) => sock.readMessages(keys);
+  sock.__read = async (keys) => {
+    updateActivity();
+    return sock.readMessages(keys);
+  };
 
-  sock.__receipt = async (jid, participant, ids, type) =>
-    sock.sendReceipt(jid, participant, ids, type);
+  sock.__receipt = async (jid, participant, ids, type) => {
+    updateActivity();
+    return sock.sendReceipt(jid, participant, ids, type);
+  };
 
   sock.__contactInfo = async (id, cachesRef = caches) => {
+    updateActivity();
+
     const jid = toJid(id);
     let profilePictureUrl;
     try {
@@ -769,6 +937,7 @@ export async function makeSocketForSession(session) {
   };
 
   sock.__typing = async (to, state = "composing") => {
+    updateActivity();
     const jid = toJid(to);
     await sock.sendPresenceUpdate(state, jid);
   };

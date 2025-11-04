@@ -179,6 +179,162 @@ app.get("/admin/metrics", (req, res) => {
   res.json(monitor.getMetrics());
 });
 
+app.get("/admin/sessions/health", async (req, res) => {
+  try {
+    const sessions = listSessions();
+    const healthData = [];
+
+    for (const session of sessions) {
+      const fullSession = getSession(session.id);
+      const statusCheck = getActualSessionStatus(fullSession);
+
+      const timeSinceActivity = fullSession.lastActivity
+        ? Date.now() - fullSession.lastActivity
+        : null;
+
+      const timeSinceConnected = fullSession.connectedAt
+        ? Date.now() - fullSession.connectedAt
+        : null;
+
+      healthData.push({
+        id: session.id,
+        status: statusCheck.actualStatus,
+        isAuthenticated: statusCheck.isAuthenticated,
+        websocket: {
+          state: statusCheck.wsState,
+          stateText: getWebSocketStateText(statusCheck.wsState),
+          isConnected: statusCheck.isWsConnected,
+        },
+        activity: {
+          lastActivity: fullSession.lastActivity,
+          timeSinceActivity: timeSinceActivity
+            ? `${Math.round(timeSinceActivity / 1000)}s`
+            : null,
+          isIdle: timeSinceActivity > 300000, // 5 min
+        },
+        connection: {
+          connectedAt: fullSession.connectedAt,
+          uptime: timeSinceConnected
+            ? `${Math.round(timeSinceConnected / 1000)}s`
+            : null,
+          reconnectAttempts: fullSession.reconnectAttempts || 0,
+        },
+        credentials: {
+          valid: statusCheck.credentialsValid,
+          phone: fullSession.state?.creds?.me?.id || null,
+          name: fullSession.state?.creds?.me?.name || null,
+        },
+      });
+    }
+
+    res.json({
+      ok: true,
+      timestamp: new Date().toISOString(),
+      totalSessions: healthData.length,
+      healthy: healthData.filter(s => s.isAuthenticated).length,
+      unhealthy: healthData.filter(s => !s.isAuthenticated).length,
+      idle: healthData.filter(s => s.activity.isIdle).length,
+      sessions: healthData,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/admin/sessions/:id/force-health-check", async (req, res) => {
+  try {
+    const session = getSession(req.params.id);
+
+    if (session.status !== "open") {
+      return res.status(400).json({
+        ok: false,
+        error: "Session is not open",
+        status: session.status,
+      });
+    }
+
+    try {
+      await session.sock.sendPresenceUpdate('available');
+      session.lastActivity = Date.now();
+
+      res.json({
+        ok: true,
+        message: "Health check passed - connection is working",
+        lastActivity: session.lastActivity,
+      });
+    } catch (err) {
+      res.status(503).json({
+        ok: false,
+        error: "Health check failed - connection is not responding",
+        details: err.message,
+        suggestion: "Use POST /sessions/:id/restart to reconnect",
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.get("/admin/config/keep-alive", (req, res) => {
+  res.json({
+    ok: true,
+    config: {
+      pingInterval: process.env.KEEP_ALIVE_PING_INTERVAL || "30000 (default)",
+      pongTimeout: process.env.KEEP_ALIVE_PONG_TIMEOUT || "10000 (default)",
+      maxMissedPongs: process.env.KEEP_ALIVE_MAX_MISSED_PONGS || "3 (default)",
+      healthCheckInterval: process.env.HEALTH_CHECK_INTERVAL || "60000 (default)",
+      maxIdleTime: process.env.MAX_IDLE_TIME || "300000 (default)",
+      autoReconnect: process.env.AUTO_RECONNECT !== "false",
+      maxReconnectAttempts: process.env.MAX_RECONNECT_ATTEMPTS || "10 (default)",
+    },
+    description: {
+      pingInterval: "Interval between keep-alive pings (ms)",
+      pongTimeout: "Timeout waiting for pong response (ms)",
+      maxMissedPongs: "Maximum consecutive missed pongs before reconnection",
+      healthCheckInterval: "Interval between health checks (ms)",
+      maxIdleTime: "Maximum time without activity before forcing check (ms)",
+      autoReconnect: "Automatically reconnect on connection issues",
+      maxReconnectAttempts: "Maximum reconnection attempts",
+    },
+  });
+});
+
+app.get("/admin/sessions/:id/reconnect-stats", (req, res) => {
+  try {
+    const session = getSession(req.params.id);
+    const statusCheck = getActualSessionStatus(session);
+
+    res.json({
+      ok: true,
+      id: session.id,
+      status: statusCheck.actualStatus,
+      reconnection: {
+        attempts: session.reconnectAttempts || 0,
+        maxAttempts: parseInt(process.env.MAX_RECONNECT_ATTEMPTS || "10"),
+        autoReconnect: process.env.AUTO_RECONNECT !== "false",
+      },
+      connection: {
+        connectedAt: session.connectedAt,
+        lastActivity: session.lastActivity,
+        timeSinceActivity: session.lastActivity
+          ? `${Math.round((Date.now() - session.lastActivity) / 1000)}s`
+          : null,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
 app.get("/admin/webhook-filters", (req, res) => {
   const config = getFilterConfig();
   res.json({
