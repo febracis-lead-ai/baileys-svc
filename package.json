@@ -2,9 +2,9 @@
   "name": "baileys-svc",
   "type": "module",
   "dependencies": {
-    "@sentry/bun": "^10.22.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc.6",
-    "axios": "^1.13.0",
+    "@sentry/bun": "^10.26.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc.8",
+    "axios": "^1.13.2",
     "compression": "^1.8.1",
     "express": "^4.21.2",
     "ioredis": "^5.8.2",
