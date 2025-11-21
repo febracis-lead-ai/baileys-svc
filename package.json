@@ -3,7 +3,7 @@
   "type": "module",
   "dependencies": {
     "@sentry/bun": "^10.26.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc.8",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.2",
     "compression": "^1.8.1",
     "express": "^4.21.2",
