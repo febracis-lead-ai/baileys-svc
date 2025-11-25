@@ -2,10 +2,11 @@ import NodeCache from "node-cache";
 import { Browsers } from "@whiskeysockets/baileys";
 import { useRedisAuthState } from "./redis-auth-store.js";
 import { makeSocketForSession } from "./socket-factory.js";
+import { AUTO_READ_MESSAGES } from "../config.js";
 
 export const sessions = new Map();
 
-export async function ensureSession(sessionId) {
+export async function ensureSession(sessionId, options = {}) {
   if (sessions.has(sessionId)) return sessions.get(sessionId);
 
   const { state, saveCreds, redis } = await useRedisAuthState(sessionId);
@@ -17,6 +18,7 @@ export async function ensureSession(sessionId) {
     lastQR: null,
     status: "init",
     reconnectAttempts: 0,
+    autoReadMessages: options.autoReadMessages ?? AUTO_READ_MESSAGES,
     caches: {
       groups: new NodeCache({ stdTTL: 300 }),
       messages: new NodeCache({ stdTTL: 6 * 3600, checkperiod: 300 }),
@@ -151,8 +153,20 @@ export function listSessions() {
       hasQR: !!s.lastQR,
       credentialsValid: status.credentialsValid,
       reconnectAttempts: s.reconnectAttempts || 0,
+      autoReadMessages: s.autoReadMessages || false,
     };
   });
+}
+
+export function updateSessionSettings(sessionId, settings) {
+  const session = getSession(sessionId);
+
+  if (settings.autoReadMessages !== undefined) {
+    session.autoReadMessages = settings.autoReadMessages;
+    console.log(`[${sessionId}] Auto-read messages: ${session.autoReadMessages}`);
+  }
+
+  return session;
 }
 
 function validateCredentials(state) {
@@ -194,9 +208,8 @@ export function getActualSessionStatus(session) {
   let actualStatus = baileyStatus || "close";
   let isAuthenticated = false;
 
-  // Verifica WebSocket state real
   let wsState = session.sock?.ws?.readyState;
-  let isWsConnected = wsState === 1; // WebSocket.OPEN
+  let isWsConnected = wsState === 1;
 
   if (baileyStatus === "open" && hasValidCreds && isWsConnected) {
     actualStatus = "open";
@@ -208,7 +221,6 @@ export function getActualSessionStatus(session) {
     actualStatus = "invalid_credentials";
     isAuthenticated = false;
   } else if (!isWsConnected && baileyStatus === "open") {
-    // Status diz "open" mas WebSocket não está conectado
     actualStatus = "connection_lost";
     isAuthenticated = false;
   } else {

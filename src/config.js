@@ -23,6 +23,13 @@ export const WEBHOOK_SKIP_BLOCKED = process.env.WEBHOOK_SKIP_BLOCKED === "false"
 export const WEBHOOK_ALLOWED_EVENTS = process.env.WEBHOOK_ALLOWED_EVENTS || "";
 export const WEBHOOK_DENIED_EVENTS = process.env.WEBHOOK_DENIED_EVENTS || "";
 
+// Message Handling
+export const AUTO_READ_MESSAGES = process.env.AUTO_READ_MESSAGES === "true";
+export const AUTO_READ_DELAY = parseInt(
+  process.env.AUTO_READ_DELAY || "1000",
+  10
+);
+
 export const KEEP_ALIVE_PING_INTERVAL = parseInt(
   process.env.KEEP_ALIVE_PING_INTERVAL || "30000",
   10
@@ -116,6 +123,11 @@ console.log("[config] Webhook Filters:", {
   skipBlocked: WEBHOOK_SKIP_BLOCKED,
   allowedEvents: WEBHOOK_ALLOWED_EVENTS || "all",
   deniedEvents: WEBHOOK_DENIED_EVENTS || "none",
+});
+
+console.log("[config] Message Handling:", {
+  autoReadMessages: AUTO_READ_MESSAGES,
+  autoReadDelay: `${AUTO_READ_DELAY}ms`,
 });
 
 console.log("[config] Connection Health:", {
